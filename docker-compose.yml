@@ -1,0 +1,55 @@
+services:
+  postgres:
+    image: timescale/timescaledb:latest-pg15
+    container_name: vapm-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: vapm
+    ports:
+      - "5433:5432"
+    volumes:
+      - vapm_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: vapm-redis
+    ports:
+      - "6380:6379"
+    volumes:
+      - vapm_redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: vapm-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/vapm
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - ./ml:/app/ml
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+volumes:
+  vapm_postgres_data:
+  vapm_redis_data:
