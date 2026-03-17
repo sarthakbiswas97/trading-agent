@@ -1,0 +1,60 @@
+{
+  "version": "20260317_161904",
+  "timestamp": "2026-03-17T16:19:04.590847",
+  "features": [
+    "rsi",
+    "macd",
+    "macd_signal",
+    "macd_histogram",
+    "ema_ratio",
+    "volatility",
+    "volume_spike",
+    "momentum",
+    "bollinger_position"
+  ],
+  "feature_count": 9,
+  "dataset": {
+    "total_samples": 17577,
+    "train_samples": 12304,
+    "val_samples": 1757,
+    "test_samples": 3516
+  },
+  "parameters": {
+    "n_estimators": 100,
+    "max_depth": 4,
+    "learning_rate": 0.1,
+    "objective": "binary:logistic",
+    "eval_metric": "logloss",
+    "random_state": 42,
+    "n_jobs": -1
+  },
+  "training": {
+    "best_iteration": 0,
+    "early_stopping_rounds": 10
+  },
+  "results": {
+    "accuracy": 0.4960182025028441,
+    "precision": 0.5280172413793104,
+    "recall": 0.13626251390433816,
+    "f1_score": 0.21662245800176835,
+    "baseline": 0.5113765642775882,
+    "improvement_over_baseline": -0.015358361774744034
+  },
+  "confusion_matrix": {
+    "true_negative": 1499,
+    "false_positive": 219,
+    "false_negative": 1553,
+    "true_positive": 245
+  },
+  "feature_importance": {
+    "macd": 0.16328246891498566,
+    "ema_ratio": 0.1506941169500351,
+    "bollinger_position": 0.13261206448078156,
+    "volatility": 0.11502138525247574,
+    "macd_signal": 0.10927503556013107,
+    "rsi": 0.09344591200351715,
+    "volume_spike": 0.08772630244493484,
+    "macd_histogram": 0.08246969431638718,
+    "momentum": 0.06547300517559052
+  }
+}
