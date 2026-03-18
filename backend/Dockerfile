@@ -12,7 +12,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY . .
+COPY backend/ .
+
+# Create ml directory (will be mounted in docker-compose)
+RUN mkdir -p /ml/models
 
 # Expose port
 EXPOSE 8000

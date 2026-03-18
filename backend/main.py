@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 
 from config import get_settings
 from db import init_db, close_db
-from services import market_data_service, feature_engine
+from services import market_data_service, feature_engine, prediction_service
 from events import event_publisher
 
 settings = get_settings()
@@ -27,6 +27,13 @@ async def lifespan(app: FastAPI):
     # Start market data service
     print("Starting market data service...")
     await market_data_service.start()
+
+    # Load ML model
+    print("Loading ML model...")
+    if prediction_service.load_model():
+        print("ML model loaded successfully")
+    else:
+        print("Warning: ML model not loaded - predictions unavailable")
 
     print(f"{settings.agent_name} is ready!")
 
@@ -173,10 +180,50 @@ async def get_latest_features():
 
 
 # ─────────────────────────────────────────────────────────────
-# TODO: Add more routes
+# PREDICTION ENDPOINTS
 # ─────────────────────────────────────────────────────────────
-# from api.routes import router
-# app.include_router(router)
+
+@app.get("/predict")
+async def get_prediction():
+    """
+    Compute features and make a prediction.
+
+    Returns prediction direction (UP/DOWN), confidence, and SHAP explanation.
+    """
+    # First compute features
+    features = await feature_engine.compute_features()
+    if features is None:
+        return {"error": "Not enough candle data to compute features"}
+
+    # Make prediction
+    prediction = await prediction_service.predict_and_publish(features)
+    if prediction is None:
+        return {"error": "Model not loaded"}
+
+    return {
+        "symbol": market_data_service.symbol,
+        "prediction": prediction.to_dict(),
+    }
+
+
+@app.get("/predict/latest")
+async def get_latest_prediction():
+    """Get most recent prediction without recomputing."""
+    if prediction_service.latest_prediction is None:
+        return {"error": "No prediction available - call /predict first"}
+
+    return {
+        "symbol": market_data_service.symbol,
+        "prediction": prediction_service.latest_prediction.to_dict(),
+    }
+
+
+@app.get("/predict/model")
+async def get_model_info():
+    """Get ML model metadata and status."""
+    return {
+        "model": prediction_service.get_model_info(),
+    }
 
 
 if __name__ == "__main__":
