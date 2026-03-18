@@ -50,12 +50,12 @@ class PredictionService:
     """
     Runs ML model inference on feature vectors.
 
-    Loads the trained XGBoost pipeline and provides predictions
+    Loads the trained XGBoost model and provides predictions
     with confidence scores and SHAP explanations.
     """
 
     def __init__(self):
-        self.pipeline = None
+        self.model = None
         self.metadata = None
         self.explainer = None
         self.feature_order: list[str] = []
@@ -73,13 +73,12 @@ class PredictionService:
 
         try:
             bundle = joblib.load(model_path)
-            self.pipeline = bundle["pipeline"]
+            self.model = bundle["model"]
             self.metadata = bundle["metadata"]
             self.feature_order = self.metadata["features"]
 
             # Create SHAP explainer from the XGBoost model
-            model = self.pipeline.named_steps["model"]
-            self.explainer = shap.TreeExplainer(model)
+            self.explainer = shap.TreeExplainer(self.model)
 
             print(f"Model loaded: v{self.metadata['version']}")
             print(f"  Accuracy: {self.metadata['results']['accuracy']:.2%}")
@@ -100,7 +99,7 @@ class PredictionService:
         Returns:
             Prediction with direction, confidence, and SHAP explanation
         """
-        if self.pipeline is None:
+        if self.model is None:
             print("Model not loaded")
             return None
 
@@ -117,19 +116,15 @@ class PredictionService:
             features.bollinger_position,
         ]])
 
-        # Get prediction and probability
-        # Pipeline handles scaling automatically
-        pred_class = self.pipeline.predict(feature_values)[0]
-        pred_proba = self.pipeline.predict_proba(feature_values)[0]
+        # Get prediction and probability (no scaling needed for XGBoost)
+        pred_class = self.model.predict(feature_values)[0]
+        pred_proba = self.model.predict_proba(feature_values)[0]
 
         direction = "UP" if pred_class == 1 else "DOWN"
         confidence = float(pred_proba[1] if pred_class == 1 else pred_proba[0])
 
-        # SHAP explanation
-        # Need scaled features for SHAP (since model sees scaled data)
-        scaler = self.pipeline.named_steps["scaler"]
-        scaled_features = scaler.transform(feature_values)
-        shap_values = self.explainer.shap_values(scaled_features)[0]
+        # SHAP explanation (no scaling needed)
+        shap_values = self.explainer.shap_values(feature_values)[0]
 
         # Get top 3 contributing features
         shap_pairs = list(zip(self.feature_order, shap_values))

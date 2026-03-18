@@ -25,7 +25,6 @@ from datetime import datetime
 # Scikit-learn
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from sklearn.pipeline import Pipeline
 from sklearn.metrics import (
     accuracy_score,
     precision_score,
@@ -56,6 +55,7 @@ METRICS_OUTPUT = f'{MODELS_DIR}/metrics_v{MODEL_VERSION}.json'
 
 # Also save as "latest" for easy access
 LATEST_MODEL = f'{MODELS_DIR}/model_bundle_latest.joblib'
+LATEST_SCALER = f'{MODELS_DIR}/scaler_latest.joblib'
 LATEST_METRICS = f'{MODELS_DIR}/metrics_latest.json'
 
 # Features to use (must match data_preparation.py)
@@ -146,22 +146,25 @@ print(f"  Test:  {len(X_test)} samples ({len(X_test)/len(df)*100:.1f}%)")
 
 
 # ============================================
-# STEP 3: Create Pipeline (Preprocessing + Model)
+# STEP 3: Create Model + Fit Scaler (for future use)
 # ============================================
 
 print("\n" + "=" * 60)
-print("Step 3: Creating pipeline...")
+print("Step 3: Creating model...")
 print("=" * 60)
 
-# Pipeline: StandardScaler → XGBClassifier
-# This ensures preprocessing is saved with the model!
-pipeline = Pipeline([
-    ('scaler', StandardScaler()),
-    ('model', XGBClassifier(**XGB_PARAMS)),
-])
+# XGBoost doesn't need scaling (tree-based, uses thresholds not distances)
+# But we fit a scaler anyway and save it separately for future-proofing
+# (in case we switch to a distance-based model like Neural Network)
 
-print("Pipeline structure:")
-print(pipeline)
+model = XGBClassifier(**XGB_PARAMS)
+scaler = StandardScaler()
+
+# Fit scaler on training data (saved separately, not used for XGBoost)
+scaler.fit(X_train)
+
+print(f"Model: XGBClassifier")
+print(f"Scaler: StandardScaler (fitted, saved separately for future use)")
 
 
 # ============================================
@@ -175,17 +178,10 @@ print("=" * 60)
 print(f"XGBoost parameters: {XGB_PARAMS}")
 print(f"Model version: {MODEL_VERSION}")
 
-# Fit scaler on train data first
-scaler = pipeline.named_steps['scaler']
-X_train_scaled = scaler.fit_transform(X_train)
-X_val_scaled = scaler.transform(X_val)
-X_test_scaled = scaler.transform(X_test)
-
-# Train XGBoost with early stopping
-model = pipeline.named_steps['model']
+# Train XGBoost directly on raw features (no scaling needed for trees)
 model.fit(
-    X_train_scaled, y_train,
-    eval_set=[(X_val_scaled, y_val)],
+    X_train, y_train,
+    eval_set=[(X_val, y_val)],
     verbose=True,
 )
 
@@ -201,9 +197,9 @@ print("\n" + "=" * 60)
 print("Step 5: Evaluating model...")
 print("=" * 60)
 
-# Predictions on test set (already scaled)
-y_pred = model.predict(X_test_scaled)
-y_pred_proba = model.predict_proba(X_test_scaled)[:, 1]  # Probability of class 1 (up)
+# Predictions on test set (no scaling needed)
+y_pred = model.predict(X_test)
+y_pred_proba = model.predict_proba(X_test)[:, 1]  # Probability of class 1 (up)
 
 # Calculate metrics
 accuracy = accuracy_score(y_test, y_pred)
@@ -272,7 +268,7 @@ explainer = shap.TreeExplainer(model)
 
 # Get SHAP values for a few test samples
 sample_size = 5
-X_sample = X_test_scaled[:sample_size]
+X_sample = X_test[:sample_size]
 shap_values = explainer.shap_values(X_sample)
 
 print(f"\nSample SHAP explanations (first {sample_size} test predictions):")
@@ -341,9 +337,9 @@ metadata = {
     'feature_importance': {feat: float(imp) for feat, imp in feature_importance},
 }
 
-# Bundle everything together - pipeline + metadata in ONE file
+# Bundle model + metadata (no scaler - XGBoost doesn't need it)
 model_bundle = {
-    'pipeline': pipeline,      # Includes scaler + model
+    'model': model,            # XGBoost model only
     'metadata': metadata,      # All metadata
 }
 
@@ -354,6 +350,10 @@ print(f"Model bundle saved to: {MODEL_OUTPUT}")
 # Also save as latest for easy access
 joblib.dump(model_bundle, LATEST_MODEL)
 print(f"Latest bundle: {LATEST_MODEL}")
+
+# Save scaler separately (for future use if switching to distance-based model)
+joblib.dump(scaler, LATEST_SCALER)
+print(f"Scaler (future-proofing): {LATEST_SCALER}")
 
 # Also save metrics as JSON for easy reading without loading model
 with open(METRICS_OUTPUT, 'w') as f:
@@ -391,12 +391,13 @@ Top 3 Predictive Features:
 Saved Files:
   - {MODEL_OUTPUT} (versioned bundle)
   - {LATEST_MODEL} (latest bundle)
+  - {LATEST_SCALER} (scaler for future use)
   - {METRICS_OUTPUT} (metrics JSON)
 
 How to Load & Use:
   # Load bundle
   bundle = joblib.load('{LATEST_MODEL}')
-  pipeline = bundle['pipeline']
+  model = bundle['model']
   metadata = bundle['metadata']
 
   # Check model info
@@ -404,7 +405,7 @@ How to Load & Use:
   print(f"Accuracy: {{metadata['results']['accuracy']}}")
   print(f"Features: {{metadata['features']}}")
 
-  # Make prediction
-  prediction = pipeline.predict(features)
-  probability = pipeline.predict_proba(features)[:, 1]
+  # Make prediction (no scaling needed for XGBoost)
+  prediction = model.predict(features)
+  probability = model.predict_proba(features)[:, 1]
 """)
