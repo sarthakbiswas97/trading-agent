@@ -1,0 +1,261 @@
+"""
+Integration tests for Trade Executor Service.
+
+Tests the full flow: prediction → decision → risk check → execution
+"""
+
+import pytest
+import asyncio
+from datetime import datetime, timezone
+
+# Add parent directory to path for imports
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from services.position_manager import PositionManager, PositionState
+from services.risk_guardian import RiskGuardian, RiskConfig
+from services.trade_executor import TradeExecutorService, ENTRY_CONFIDENCE_THRESHOLD, POSITION_SIZE_PCT
+from models.decision import TradeAction
+
+
+class MockEventPublisher:
+    """Mock Redis publisher for testing."""
+
+    def __init__(self):
+        self.published = []
+        self.stored = {}
+
+    async def connect(self):
+        pass
+
+    async def disconnect(self):
+        pass
+
+    async def publish(self, channel: str, data: dict):
+        self.published.append((channel, data))
+
+    async def add_to_stream(self, stream: str, data: dict, maxlen: int = 1000):
+        if stream not in self.stored:
+            self.stored[stream] = []
+        self.stored[stream].append(data)
+
+    async def set_json(self, key: str, data: dict, expire_seconds: int = None):
+        self.stored[key] = data
+
+    async def get_json(self, key: str):
+        return self.stored.get(key)
+
+
+class TestPositionManager:
+    """Tests for PositionManager."""
+
+    def test_empty_position(self):
+        """Test initial empty position state."""
+        pm = PositionManager(initial_capital=10000.0)
+        assert not pm.has_position
+        assert pm.position.size == 0.0
+        assert pm.position.side == ""
+
+    def test_calculate_position_size(self):
+        """Test position size calculation."""
+        pm = PositionManager(initial_capital=10000.0)
+
+        # 3% of $10,000 = $300 worth of ETH at $2000 = 0.15 ETH
+        size = pm.calculate_position_size(price=2000.0, position_pct=0.03)
+        assert size == 0.15
+
+        # 5% of $10,000 = $500 worth at $2500 = 0.2 ETH
+        size = pm.calculate_position_size(price=2500.0, position_pct=0.05)
+        assert size == 0.2
+
+    @pytest.mark.asyncio
+    async def test_open_close_position(self):
+        """Test opening and closing a position."""
+        import services.position_manager as pm_module
+
+        # Mock the event_publisher
+        mock_publisher = MockEventPublisher()
+        original_publisher = pm_module.event_publisher
+        pm_module.event_publisher = mock_publisher
+
+        try:
+            pm = PositionManager(initial_capital=10000.0)
+            pm_module.event_publisher = mock_publisher
+
+            # Open position
+            pos = await pm.open_position(
+                side="LONG",
+                size=0.15,
+                entry_price=2000.0,
+                decision_id="test-decision-1",
+            )
+
+            assert pm.has_position
+            assert pos.side == "LONG"
+            assert pos.size == 0.15
+            assert pos.entry_price == 2000.0
+
+            # Update price and check PnL
+            await pm.update_price(2100.0)
+            assert pm.position.current_price == 2100.0
+            assert pm.position.unrealized_pnl == pytest.approx(15.0)  # 0.15 * 100
+            assert pm.position.unrealized_pnl_pct == pytest.approx(0.05)  # 5%
+
+            # Close position
+            closed, realized_pnl = await pm.close_position(
+                exit_price=2100.0,
+                reason="test",
+                decision_id="test-decision-2",
+            )
+
+            assert not pm.has_position
+            assert realized_pnl == pytest.approx(15.0)
+
+        finally:
+            pm_module.event_publisher = original_publisher
+
+
+class TestRiskGuardian:
+    """Tests for RiskGuardian."""
+
+    def test_default_config(self):
+        """Test default risk configuration."""
+        rg = RiskGuardian()
+        assert rg.config.max_position_size_pct == 0.05
+        assert rg.config.max_daily_loss_pct == 0.03
+        assert rg.config.stop_loss_pct == 0.02
+        assert rg.config.take_profit_pct == 0.04
+
+    @pytest.mark.asyncio
+    async def test_check_trade_passing(self):
+        """Test risk check that should pass."""
+        rg = RiskGuardian(config=RiskConfig(
+            min_trade_interval_seconds=0,  # No cooldown for test
+        ))
+
+        result = await rg.check_trade(
+            action="BUY",
+            position_size_pct=0.03,
+            current_exposure_pct=0.0,
+        )
+
+        assert result.can_trade
+        assert len(result.violations) == 0
+        assert result.checks["position_size"]
+        assert result.checks["total_exposure"]
+
+    @pytest.mark.asyncio
+    async def test_check_trade_position_too_large(self):
+        """Test risk check failing for oversized position."""
+        rg = RiskGuardian(config=RiskConfig(
+            max_position_size_pct=0.05,
+            min_trade_interval_seconds=0,
+        ))
+
+        result = await rg.check_trade(
+            action="BUY",
+            position_size_pct=0.10,  # 10% - too large
+            current_exposure_pct=0.0,
+        )
+
+        assert not result.can_trade
+        assert not result.checks["position_size"]
+        assert "Position size" in result.violations[0]
+
+    @pytest.mark.asyncio
+    async def test_check_trade_exposure_exceeded(self):
+        """Test risk check failing for excessive exposure."""
+        rg = RiskGuardian(config=RiskConfig(
+            max_total_exposure_pct=0.10,
+            min_trade_interval_seconds=0,
+        ))
+
+        result = await rg.check_trade(
+            action="BUY",
+            position_size_pct=0.05,
+            current_exposure_pct=0.08,  # Total would be 13%
+        )
+
+        assert not result.can_trade
+        assert not result.checks["total_exposure"]
+
+    def test_stop_loss_check(self):
+        """Test stop loss trigger."""
+        rg = RiskGuardian(config=RiskConfig(stop_loss_pct=0.02))
+
+        assert not rg.check_stop_loss(-0.01)  # -1% - not triggered
+        assert rg.check_stop_loss(-0.02)      # -2% - triggered
+        assert rg.check_stop_loss(-0.05)      # -5% - triggered
+
+    def test_take_profit_check(self):
+        """Test take profit trigger."""
+        rg = RiskGuardian(config=RiskConfig(take_profit_pct=0.04))
+
+        assert not rg.check_take_profit(0.03)  # +3% - not triggered
+        assert rg.check_take_profit(0.04)      # +4% - triggered
+        assert rg.check_take_profit(0.10)      # +10% - triggered
+
+
+class TestTradeDecisionLogic:
+    """Tests for trade decision logic without full execution."""
+
+    @pytest.mark.asyncio
+    async def test_entry_conditions_direction(self):
+        """Test entry requires UP direction."""
+        executor = TradeExecutorService()
+
+        # DOWN direction should not enter
+        action, reason = await executor._evaluate_entry(
+            direction="DOWN",
+            confidence=0.70,
+            price=2000.0,
+        )
+        assert action == TradeAction.HOLD
+        assert "DOWN" in reason
+
+    @pytest.mark.asyncio
+    async def test_entry_conditions_confidence(self):
+        """Test entry requires sufficient confidence."""
+        executor = TradeExecutorService()
+
+        # Low confidence should not enter
+        action, reason = await executor._evaluate_entry(
+            direction="UP",
+            confidence=0.50,  # Below 0.60 threshold
+            price=2000.0,
+        )
+        assert action == TradeAction.HOLD
+        assert "Confidence" in reason
+
+
+class TestEndToEndFlow:
+    """End-to-end integration tests."""
+
+    @pytest.mark.asyncio
+    async def test_prediction_to_hold_flow(self):
+        """Test prediction with DOWN direction results in HOLD."""
+        # This test simulates receiving a prediction event
+        executor = TradeExecutorService()
+
+        prediction = {
+            "timestamp": 1234567890,
+            "price": 2000.0,
+            "direction": "DOWN",
+            "confidence": 0.65,
+            "shap_explanation": {},
+        }
+
+        action, reason = await executor._evaluate_action(
+            direction=prediction["direction"],
+            confidence=prediction["confidence"],
+            price=prediction["price"],
+        )
+
+        assert action == TradeAction.HOLD
+        assert "DOWN" in reason
+
+
+# Run with: pytest tests/test_trade_executor.py -v
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

@@ -15,6 +15,15 @@ class Settings(BaseSettings):
     rpc_url: str = "https://sepolia.base.org"
     private_key: str = ""
     etherscan_api_key: str = ""
+    chain_id: int = 84532  # Base Sepolia
+
+    # Contract Addresses (deployed on Base Sepolia)
+    agent_registry_address: str = ""
+    validation_registry_address: str = ""
+    trade_executor_address: str = ""
+
+    # Blockchain feature flags
+    blockchain_enabled: bool = False  # Set to True when contracts are deployed
 
     # Market Data
     binance_api_key: str = ""

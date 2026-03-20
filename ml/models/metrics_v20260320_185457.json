@@ -1,0 +1,59 @@
+{
+  "version": "20260320_185457",
+  "timestamp": "2026-03-20T18:55:06.863222",
+  "features": [
+    "rsi",
+    "macd",
+    "macd_signal",
+    "macd_histogram",
+    "ema_ratio",
+    "volatility",
+    "volume_spike",
+    "momentum",
+    "bollinger_position"
+  ],
+  "feature_count": 9,
+  "hyperparameter_tuning": {
+    "method": "GridSearchCV",
+    "cv": "TimeSeriesSplit",
+    "best_params": {
+      "learning_rate": 0.05,
+      "max_depth": 4,
+      "n_estimators": 150
+    },
+    "best_cv_score": 0.5529510723727067,
+    "search_time_seconds": 9.395436
+  },
+  "results": {
+    "accuracy": 0.5205897109335803,
+    "precision": 0.5190328847952795,
+    "recall": 0.5569454096208787,
+    "f1": 0.5373212157330155,
+    "auc": 0.524889380056452,
+    "baseline": 0.5001736714136853,
+    "improvement": 0.020416039519895013,
+    "confusion_matrix": [
+      [
+        6276,
+        6684
+      ],
+      [
+        5738,
+        7213
+      ]
+    ],
+    "optimal_threshold": 0.4590113162994385,
+    "optimal_f1": 0.6665122697570893
+  },
+  "feature_importance": {
+    "macd": 0.3810287415981293,
+    "bollinger_position": 0.12563326954841614,
+    "volatility": 0.09196361154317856,
+    "ema_ratio": 0.091060109436512,
+    "macd_histogram": 0.08699807524681091,
+    "macd_signal": 0.07156066596508026,
+    "volume_spike": 0.06413488835096359,
+    "momentum": 0.04429163411259651,
+    "rsi": 0.043329037725925446
+  }
+}

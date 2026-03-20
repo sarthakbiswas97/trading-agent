@@ -1,0 +1,56 @@
+{
+  "version": "20260320_190311",
+  "timestamp": "2026-03-20T19:03:28.638113",
+  "features": [
+    "rsi",
+    "macd",
+    "macd_signal",
+    "macd_histogram",
+    "ema_ratio",
+    "volatility",
+    "volume_spike",
+    "momentum",
+    "bollinger_position",
+    "adx",
+    "atr",
+    "volatility_regime",
+    "price_acceleration",
+    "range_position"
+  ],
+  "feature_count": 14,
+  "includes_regime_features": true,
+  "hyperparameters": {
+    "learning_rate": 0.1,
+    "max_depth": 4,
+    "n_estimators": 100
+  },
+  "results": {
+    "accuracy": 0.52409452467372,
+    "precision": 0.5223471741637832,
+    "recall": 0.5597528003089997,
+    "f1": 0.5404034754073909,
+    "auc": 0.5268759260572965,
+    "improvement": 0.023940072592478212
+  },
+  "feature_importance": {
+    "macd": 0.31356048583984375,
+    "bollinger_position": 0.083936907351017,
+    "momentum": 0.06702811270952225,
+    "macd_signal": 0.06495428830385208,
+    "volatility": 0.06290299445390701,
+    "range_position": 0.06085223704576492,
+    "volatility_regime": 0.05358732119202614,
+    "atr": 0.052736733108758926,
+    "ema_ratio": 0.04713025316596031,
+    "macd_histogram": 0.046749528497457504,
+    "adx": 0.04284698888659477,
+    "rsi": 0.04110116884112358,
+    "price_acceleration": 0.03153979778289795,
+    "volume_spike": 0.031073134392499924
+  },
+  "comparison": {
+    "base_accuracy": 0.5227816819831648,
+    "all_accuracy": 0.52409452467372,
+    "regime_gain": 0.0013128426905552049
+  }
+}

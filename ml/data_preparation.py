@@ -23,7 +23,7 @@ from core.indicators import compute_all_features, normalize_features, MIN_CANDLE
 # CONFIGURATION
 # ============================================
 
-PREDICTION_HORIZON = 5  # Predict price movement 5 candles ahead
+PREDICTION_HORIZON = 15  # Predict price movement 15 candles ahead (optimized via horizon_test.py)
 INPUT_FILE = 'candles.csv'
 OUTPUT_FILE = 'dataset/training_data.csv'
 
