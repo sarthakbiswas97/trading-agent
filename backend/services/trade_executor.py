@@ -22,6 +22,7 @@ from events.publisher import event_publisher
 from services.position_manager import position_manager, PositionState
 from services.risk_guardian import risk_guardian
 from services.blockchain_client import blockchain_client
+from services.feature_engine import feature_engine
 from models.decision import TradeAction, DecisionRecord, MarketState, ModelOutput, StrategyDecision, RiskValidation
 from db.database import get_session
 from db.models import Decision as DecisionModel, TradeExecution as TradeExecutionModel
@@ -30,7 +31,7 @@ from db.models import Decision as DecisionModel, TradeExecution as TradeExecutio
 # Entry/exit thresholds
 ENTRY_CONFIDENCE_THRESHOLD = 0.60
 EXIT_REVERSAL_CONFIDENCE = 0.55
-POSITION_SIZE_PCT = 0.03  # Fixed 3% position size
+BASE_POSITION_SIZE_PCT = 0.03  # Base 3% position size (scaled by volatility)
 
 
 @dataclass
@@ -82,7 +83,7 @@ class TradeExecutorService:
         self._running = True
         print("TradeExecutorService started")
         print(f"  Entry confidence threshold: {ENTRY_CONFIDENCE_THRESHOLD}")
-        print(f"  Position size: {POSITION_SIZE_PCT:.0%}")
+        print(f"  Base position size: {BASE_POSITION_SIZE_PCT:.0%} (volatility-scaled)")
         print(f"  Has position: {position_manager.has_position}")
 
     async def stop(self):
@@ -111,14 +112,14 @@ class TradeExecutorService:
         if position_manager.has_position:
             await position_manager.update_price(price)
 
-        # Evaluate what to do
-        action, reason = await self._evaluate_action(direction, confidence, price)
+        # Evaluate what to do (now returns position_size for dynamic sizing)
+        action, reason, position_size = await self._evaluate_action(direction, confidence, price)
 
         if action == TradeAction.HOLD:
             print(f"  -> HOLD: {reason}")
             return
 
-        # Build decision record
+        # Build decision record with dynamic position size
         decision = await self._build_decision(
             price=price,
             direction=direction,
@@ -126,10 +127,11 @@ class TradeExecutorService:
             shap=shap,
             action=action,
             reason=reason,
+            position_size_pct=position_size,
         )
 
-        # Execute the trade
-        result = await self._execute_trade(decision, price)
+        # Execute the trade with dynamic position size
+        result = await self._execute_trade(decision, price, position_size)
 
         # Log result
         if result.success:
@@ -144,12 +146,12 @@ class TradeExecutorService:
         direction: str,
         confidence: float,
         price: float,
-    ) -> tuple[TradeAction, str]:
+    ) -> tuple[TradeAction, str, float]:
         """
         Evaluate what trading action to take.
 
         Returns:
-            Tuple of (action, reason)
+            Tuple of (action, reason, position_size_pct)
         """
         # Check if we have a position
         if position_manager.has_position:
@@ -162,55 +164,90 @@ class TradeExecutorService:
         direction: str,
         confidence: float,
         price: float,
-    ) -> tuple[TradeAction, str]:
-        """Evaluate entry conditions."""
+    ) -> tuple[TradeAction, str, float]:
+        """
+        Evaluate entry conditions with dynamic position sizing.
+
+        Returns:
+            Tuple of (action, reason, position_size_pct)
+        """
         # Must be bullish with high confidence
         if direction != "UP":
-            return TradeAction.HOLD, "Direction is DOWN (long-only strategy)"
+            return TradeAction.HOLD, "Direction is DOWN (long-only strategy)", 0.0
 
         if confidence < ENTRY_CONFIDENCE_THRESHOLD:
-            return TradeAction.HOLD, f"Confidence {confidence:.1%} below threshold {ENTRY_CONFIDENCE_THRESHOLD:.0%}"
+            return TradeAction.HOLD, f"Confidence {confidence:.1%} below threshold {ENTRY_CONFIDENCE_THRESHOLD:.0%}", 0.0
 
-        # Check risk limits
+        # Get current features for volatility-scaled position sizing
+        features = feature_engine.latest_features
+        volatility = features.volatility if features else 0.02
+
+        # Calculate dynamic position size (volatility-scaled with throttling)
+        position_size = risk_guardian.calculate_position_size(
+            base_size_pct=BASE_POSITION_SIZE_PCT,
+            current_volatility=volatility,
+        )
+
+        # Check if throttled to zero (drawdown too high)
+        if position_size < 0.005:  # Less than 0.5%
+            throttle_factor = risk_guardian.get_throttle_factor()
+            return TradeAction.HOLD, f"Position size throttled to {position_size:.1%} (throttle: {throttle_factor:.0%})", 0.0
+
+        # Check risk limits with dynamic position size
         risk_result = await risk_guardian.check_trade(
             action="BUY",
-            position_size_pct=POSITION_SIZE_PCT,
+            position_size_pct=position_size,
             current_exposure_pct=0.0,
         )
 
         if not risk_result.can_trade:
-            return TradeAction.HOLD, f"Risk check failed: {', '.join(risk_result.violations)}"
+            return TradeAction.HOLD, f"Risk check failed: {', '.join(risk_result.violations)}", 0.0
 
-        return TradeAction.BUY, f"Entry signal: {direction} with {confidence:.1%} confidence"
+        return TradeAction.BUY, f"Entry signal: {direction} with {confidence:.1%} confidence (size: {position_size:.1%})", position_size
 
     async def _evaluate_exit(
         self,
         direction: str,
         confidence: float,
         price: float,
-    ) -> tuple[TradeAction, str]:
-        """Evaluate exit conditions."""
+    ) -> tuple[TradeAction, str, float]:
+        """
+        Evaluate exit conditions with ATR-based dynamic stop-loss.
+
+        Returns:
+            Tuple of (action, reason, position_size_pct)
+        """
         pos = position_manager.position
         pnl_pct = pos.unrealized_pnl_pct
 
-        # 1. Stop loss check
-        if risk_guardian.check_stop_loss(pnl_pct):
-            return TradeAction.SELL, f"Stop loss triggered at {pnl_pct:.1%}"
+        # Get current features for ATR-based stop-loss
+        features = feature_engine.latest_features
+        atr = features.atr if features else 0.0
+
+        # 1. Dynamic ATR-based stop loss check (if ATR available)
+        if atr > 0:
+            if risk_guardian.check_stop_loss_dynamic(pos.entry_price, price, atr):
+                stop_price = risk_guardian.calculate_stop_loss_price(pos.entry_price, atr)
+                return TradeAction.SELL, f"ATR stop-loss triggered at ${price:.2f} (stop: ${stop_price:.2f})", 0.0
+        else:
+            # Fallback to percentage-based stop loss
+            if risk_guardian.check_stop_loss(pnl_pct):
+                return TradeAction.SELL, f"Stop loss triggered at {pnl_pct:.1%}", 0.0
 
         # 2. Take profit check
         if risk_guardian.check_take_profit(pnl_pct):
-            return TradeAction.SELL, f"Take profit triggered at {pnl_pct:.1%}"
+            return TradeAction.SELL, f"Take profit triggered at {pnl_pct:.1%}", 0.0
 
         # 3. Reversal signal check
         if direction == "DOWN" and confidence >= EXIT_REVERSAL_CONFIDENCE:
-            return TradeAction.SELL, f"Reversal signal: DOWN with {confidence:.1%} confidence"
+            return TradeAction.SELL, f"Reversal signal: DOWN with {confidence:.1%} confidence", 0.0
 
         # 4. Time decay check
         age_seconds = position_manager.get_position_age_seconds()
         if risk_guardian.check_position_age(age_seconds):
-            return TradeAction.SELL, f"Position age {age_seconds/60:.0f}min exceeds limit"
+            return TradeAction.SELL, f"Position age {age_seconds/60:.0f}min exceeds limit", 0.0
 
-        return TradeAction.HOLD, f"Holding position (PnL: {pnl_pct:+.1%})"
+        return TradeAction.HOLD, f"Holding position (PnL: {pnl_pct:+.1%})", 0.0
 
     async def _build_decision(
         self,
@@ -220,21 +257,23 @@ class TradeExecutorService:
         shap: dict,
         action: TradeAction,
         reason: str,
+        position_size_pct: float = 0.0,
     ) -> DecisionRecord:
-        """Build a complete decision record."""
+        """Build a complete decision record with dynamic position sizing."""
         decision_id = str(uuid.uuid4())
 
-        # Build market state (simplified - would come from feature engine)
+        # Build market state from feature engine if available
+        features = feature_engine.latest_features
         market_state = MarketState(
             price=price,
-            rsi=50.0,  # Placeholder
-            macd=0.0,
-            macd_signal=0.0,
-            ema_ratio=1.0,
-            volatility=0.02,
-            volume_spike=1.0,
-            momentum=0.0,
-            bollinger_position=0.5,
+            rsi=features.rsi if features else 50.0,
+            macd=features.macd if features else 0.0,
+            macd_signal=features.macd_signal if features else 0.0,
+            ema_ratio=features.ema_ratio if features else 1.0,
+            volatility=features.volatility if features else 0.02,
+            volume_spike=features.volume_spike if features else 1.0,
+            momentum=features.momentum if features else 0.0,
+            bollinger_position=features.bollinger_position if features else 0.5,
         )
 
         # Model output
@@ -244,17 +283,17 @@ class TradeExecutorService:
             shap_values={k: v.get("value", 0) for k, v in shap.items()},
         )
 
-        # Strategy decision
+        # Strategy decision with dynamic position size
         strategy_decision = StrategyDecision(
             action=action,
             reason=reason,
-            position_size_pct=POSITION_SIZE_PCT if action == TradeAction.BUY else 0.0,
+            position_size_pct=position_size_pct if action == TradeAction.BUY else 0.0,
         )
 
-        # Risk validation
+        # Risk validation with dynamic position size
         risk_result = await risk_guardian.check_trade(
             action=action.value,
-            position_size_pct=POSITION_SIZE_PCT,
+            position_size_pct=position_size_pct,
             current_exposure_pct=position_manager.position.value_usd / position_manager.capital if position_manager.has_position else 0.0,
         )
 
@@ -283,6 +322,7 @@ class TradeExecutorService:
         self,
         decision: DecisionRecord,
         price: float,
+        position_size_pct: float = BASE_POSITION_SIZE_PCT,
     ) -> TradeResult:
         """
         Execute the trade with optional on-chain logging.
@@ -293,6 +333,7 @@ class TradeExecutorService:
         3. Execute trade (simulated position update)
         4. Mark decision as executed on-chain
         5. Save to PostgreSQL
+        6. Update equity tracking for drawdown management
         """
         action = decision.strategy_decision.action
         decision_hash = decision.compute_hash()
@@ -322,9 +363,9 @@ class TradeExecutorService:
             except Exception as e:
                 print(f"  [Chain] Log error: {e}")
 
-        # Calculate trade size
+        # Calculate trade size using dynamic position_size_pct
         if action == TradeAction.BUY:
-            size = position_manager.calculate_position_size(price, POSITION_SIZE_PCT)
+            size = position_manager.calculate_position_size(price, position_size_pct)
 
             try:
                 await position_manager.open_position(
@@ -344,8 +385,9 @@ class TradeExecutorService:
                     reason=str(e),
                 )
 
-            # Record the trade
-            await risk_guardian.record_trade()
+            # Record the trade with current capital for equity tracking
+            current_capital = position_manager.get_current_capital()
+            await risk_guardian.record_trade(current_capital=current_capital)
 
             # Save to database
             await self._save_decision(decision)
@@ -382,9 +424,13 @@ class TradeExecutorService:
                 decision_id=decision.id,
             )
 
-            # Record trade with PnL (as percentage of capital)
+            # Update capital with realized PnL
+            position_manager.update_capital(realized_pnl)
+
+            # Record trade with PnL and updated capital for equity/drawdown tracking
             pnl_pct = realized_pnl / position_manager.capital
-            await risk_guardian.record_trade(pnl=pnl_pct)
+            current_capital = position_manager.get_current_capital()
+            await risk_guardian.record_trade(pnl=pnl_pct, current_capital=current_capital)
 
             # Save to database
             await self._save_decision(decision)
@@ -528,19 +574,31 @@ class TradeExecutorService:
             shap={},
             action=TradeAction.SELL,
             reason=f"Manual close: {reason}",
+            position_size_pct=0.0,  # Sell has no position size
         )
 
-        return await self._execute_trade(decision, price)
+        return await self._execute_trade(decision, price, position_size_pct=0.0)
 
     def get_status(self) -> dict:
-        """Get current executor status."""
+        """Get current executor status with risk metrics."""
+        state = risk_guardian.state
         return {
             "running": self._running,
             "has_position": position_manager.has_position,
             "position": position_manager.position.to_dict() if position_manager.has_position else None,
-            "trades_today": risk_guardian.state.trades_today,
-            "daily_pnl_pct": risk_guardian.state.daily_pnl_pct,
-            "trading_enabled": risk_guardian.is_trading_enabled,
+            "capital": {
+                "current": position_manager.get_current_capital(),
+                "base": position_manager.capital,
+                "peak": state.peak_capital,
+            },
+            "risk": {
+                "current_drawdown_pct": state.current_drawdown_pct,
+                "max_drawdown_pct": state.max_drawdown_pct,
+                "throttle_factor": risk_guardian.get_throttle_factor(),
+                "trading_enabled": risk_guardian.is_trading_enabled,
+            },
+            "trades_today": state.trades_today,
+            "daily_pnl_pct": state.daily_pnl_pct,
             "last_prediction": self._last_prediction,
             "recent_trades": [t.to_dict() for t in self.trade_history[-10:]],
         }

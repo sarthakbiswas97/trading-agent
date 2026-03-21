@@ -30,7 +30,7 @@ class FeatureVector:
     timestamp: int
     price: float
 
-    # Indicators
+    # Base indicators
     rsi: float                 # Relative Strength Index (0-100)
     macd: float                # MACD line
     macd_signal: float         # MACD signal line
@@ -41,8 +41,15 @@ class FeatureVector:
     momentum: float            # Price change over N periods
     bollinger_position: float  # Position within Bollinger bands (-1 to 1)
 
+    # Regime indicators (for risk management)
+    adx: float = 25.0              # Average Directional Index (trend strength)
+    atr: float = 0.0               # Average True Range (absolute volatility)
+    volatility_regime: float = 0.5 # Volatility percentile (0-1)
+    price_acceleration: float = 0.0  # 2nd derivative of price
+    range_position: float = 0.0    # Position in recent range (-1 to 1)
+
     def to_array(self) -> np.ndarray:
-        """Convert to numpy array for ML model."""
+        """Convert to numpy array for ML model (base features only)."""
         return np.array([
             self.rsi / 100,              # Normalize to 0-1
             self.macd,                   # Already normalized by price scale
@@ -53,6 +60,25 @@ class FeatureVector:
             self.volume_spike - 1,       # Center around 0
             self.momentum,
             self.bollinger_position,
+        ])
+
+    def to_array_full(self) -> np.ndarray:
+        """Convert to numpy array including regime features (14 features)."""
+        return np.array([
+            self.rsi / 100,
+            self.macd,
+            self.macd_signal,
+            self.macd_histogram,
+            self.ema_ratio - 1,
+            self.volatility,
+            self.volume_spike - 1,
+            self.momentum,
+            self.bollinger_position,
+            self.adx / 100,              # Normalize to 0-1
+            self.atr / self.price,       # Normalize by price
+            self.volatility_regime,      # Already 0-1
+            self.price_acceleration * 100,  # Scale up
+            self.range_position,         # Already -1 to 1
         ])
 
     def to_dict(self) -> dict:
@@ -69,6 +95,12 @@ class FeatureVector:
             "volume_spike": round(self.volume_spike, 4),
             "momentum": round(self.momentum, 6),
             "bollinger_position": round(self.bollinger_position, 4),
+            # Regime indicators
+            "adx": round(self.adx, 2),
+            "atr": round(self.atr, 4),
+            "volatility_regime": round(self.volatility_regime, 4),
+            "price_acceleration": round(self.price_acceleration, 6),
+            "range_position": round(self.range_position, 4),
         }
 
     @classmethod
@@ -86,6 +118,12 @@ class FeatureVector:
             volume_spike=data["volume_spike"],
             momentum=data["momentum"],
             bollinger_position=data["bollinger_position"],
+            # Regime indicators (with defaults for backward compatibility)
+            adx=data.get("adx", 25.0),
+            atr=data.get("atr", 0.0),
+            volatility_regime=data.get("volatility_regime", 0.5),
+            price_acceleration=data.get("price_acceleration", 0.0),
+            range_position=data.get("range_position", 0.0),
         )
 
 
@@ -112,18 +150,23 @@ class FeatureEngine:
         """
         # Get candles if not provided
         if candles is None:
-            candles = await market_data_service.get_recent_candles(limit=100)
+            candles = await market_data_service.get_recent_candles(limit=150)
 
         if len(candles) < MIN_CANDLES:
             print(f"Not enough candles: {len(candles)} < {MIN_CANDLES}")
             return None
 
-        # Extract price and volume arrays
+        # Extract OHLCV arrays
         closes = np.array([c.close for c in candles])
+        highs = np.array([c.high for c in candles])
+        lows = np.array([c.low for c in candles])
         volumes = np.array([c.volume for c in candles])
 
-        # Compute all indicators using shared function
-        features_dict = compute_all_features(closes, volumes)
+        # Compute all indicators including regime features (ADX, ATR, etc.)
+        features_dict = compute_all_features(
+            closes, volumes, highs, lows,
+            include_regime=True
+        )
 
         # Create feature vector
         features = FeatureVector.from_dict(

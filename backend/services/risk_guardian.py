@@ -23,11 +23,15 @@ class RiskConfig:
     max_total_exposure_pct: float = 0.10     # 10% max total exposure
     max_daily_loss_pct: float = 0.03         # 3% daily loss limit
     max_drawdown_pct: float = 0.10           # 10% max drawdown
+    circuit_breaker_drawdown_pct: float = 0.08  # 8% auto circuit breaker
     min_trade_interval_seconds: int = 60     # 60s between trades
     max_trades_per_day: int = 50             # Max 50 trades/day
-    stop_loss_pct: float = 0.02              # 2% stop loss
+    stop_loss_pct: float = 0.02              # 2% stop loss (fallback)
     take_profit_pct: float = 0.04            # 4% take profit
     max_position_age_seconds: int = 1800     # 30 minutes max hold
+    target_volatility: float = 0.02          # 2% target daily volatility
+    atr_stop_multiplier: float = 2.0         # ATR multiplier for stop-loss
+    max_stop_loss_pct: float = 0.03          # 3% max stop-loss cap
 
 
 class RiskGuardian:
@@ -222,7 +226,198 @@ class RiskGuardian:
         """Check if position has exceeded max hold time."""
         return age_seconds >= self.config.max_position_age_seconds
 
-    async def record_trade(self, pnl: float = 0.0):
+    # ================================================================
+    # ADAPTIVE RISK MANAGEMENT (New Methods)
+    # ================================================================
+
+    async def update_equity(self, current_capital: float):
+        """
+        Update equity curve and calculate drawdown.
+
+        Called after every trade close or periodic equity check.
+        Automatically triggers circuit breaker at 8% drawdown.
+
+        Args:
+            current_capital: Current portfolio value in USD
+        """
+        # Initialize peak capital if not set
+        if self._state.peak_capital <= 0:
+            self._state.peak_capital = current_capital
+
+        # Update peak capital (high water mark)
+        if current_capital > self._state.peak_capital:
+            self._state.peak_capital = current_capital
+
+        # Calculate current drawdown from peak
+        if self._state.peak_capital > 0:
+            self._state.current_drawdown_pct = (
+                (self._state.peak_capital - current_capital) / self._state.peak_capital
+            )
+            # Track max drawdown ever
+            self._state.max_drawdown_pct = max(
+                self._state.max_drawdown_pct,
+                self._state.current_drawdown_pct
+            )
+
+        # Auto circuit breaker at 8% drawdown
+        if self._state.current_drawdown_pct >= self.config.circuit_breaker_drawdown_pct:
+            if not self._circuit_breaker_active:
+                await self.trigger_circuit_breaker(
+                    f"Drawdown {self._state.current_drawdown_pct:.1%} exceeded "
+                    f"{self.config.circuit_breaker_drawdown_pct:.0%} limit"
+                )
+
+        await self.save_state()
+
+    def get_throttle_factor(self) -> float:
+        """
+        Calculate position size throttle based on current drawdown.
+
+        Reduces position sizes as losses accumulate to preserve capital.
+
+        Returns:
+            Factor 0.0-1.0 to multiply position size by.
+
+        Drawdown Brackets:
+            | Drawdown | Factor | Effect        |
+            |----------|--------|---------------|
+            | 0-2%     | 1.00   | Full size     |
+            | 2-4%     | 0.75   | 75% size      |
+            | 4-6%     | 0.50   | 50% size      |
+            | 6-8%     | 0.25   | 25% size      |
+            | 8%+      | 0.00   | No trading    |
+        """
+        dd = self._state.current_drawdown_pct
+
+        if dd < 0.02:
+            return 1.0
+        elif dd < 0.04:
+            return 0.75
+        elif dd < 0.06:
+            return 0.50
+        elif dd < 0.08:
+            return 0.25
+        else:
+            return 0.0  # Circuit breaker territory
+
+    def calculate_position_size(
+        self,
+        base_size_pct: float,
+        current_volatility: float,
+    ) -> float:
+        """
+        Calculate volatility-scaled position size with drawdown throttling.
+
+        Scales position inversely with volatility:
+        - High volatility → smaller position (less risk per trade)
+        - Low volatility → larger position (up to 2x base)
+
+        Also applies drawdown-based throttling.
+
+        Args:
+            base_size_pct: Base position size as % of capital (e.g., 0.03 for 3%)
+            current_volatility: Current market volatility (std dev of returns)
+
+        Returns:
+            Adjusted position size as % of capital
+        """
+        # Volatility scaling (inverse relationship)
+        # High vol = smaller position, low vol = larger position
+        vol_scalar = self.config.target_volatility / max(current_volatility, 0.005)
+        vol_scalar = min(max(vol_scalar, 0.5), 2.0)  # Clamp 0.5x to 2x
+
+        # Apply drawdown throttle
+        throttle = self.get_throttle_factor()
+
+        # Calculate final size
+        adjusted_size = base_size_pct * vol_scalar * throttle
+
+        # Never exceed max position limit
+        return min(adjusted_size, self.config.max_position_size_pct)
+
+    def calculate_stop_loss_price(
+        self,
+        entry_price: float,
+        atr: float,
+    ) -> float:
+        """
+        Calculate dynamic stop-loss price based on ATR.
+
+        Uses ATR × multiplier for stop distance, but caps at max percentage.
+
+        Args:
+            entry_price: Position entry price
+            atr: Current Average True Range value
+
+        Returns:
+            Stop-loss price (for long positions)
+        """
+        # ATR-based stop distance
+        atr_stop_distance = atr * self.config.atr_stop_multiplier
+
+        # Cap at max stop percentage (e.g., 3% of entry)
+        max_stop_distance = entry_price * self.config.max_stop_loss_pct
+
+        # Use the smaller of the two (tighter stop)
+        stop_distance = min(atr_stop_distance, max_stop_distance)
+
+        return entry_price - stop_distance
+
+    def check_stop_loss_dynamic(
+        self,
+        entry_price: float,
+        current_price: float,
+        atr: float,
+    ) -> bool:
+        """
+        Check if position should be stopped out using dynamic ATR-based stop.
+
+        Args:
+            entry_price: Position entry price
+            current_price: Current market price
+            atr: Current Average True Range
+
+        Returns:
+            True if stop-loss triggered
+        """
+        stop_price = self.calculate_stop_loss_price(entry_price, atr)
+        return current_price <= stop_price
+
+    def get_risk_status(self) -> dict:
+        """Get comprehensive risk status for monitoring."""
+        return {
+            "drawdown": {
+                "current_pct": round(self._state.current_drawdown_pct * 100, 2),
+                "max_pct": round(self._state.max_drawdown_pct * 100, 2),
+                "peak_capital": round(self._state.peak_capital, 2),
+            },
+            "throttle": {
+                "factor": self.get_throttle_factor(),
+                "reason": self._get_throttle_reason(),
+            },
+            "circuit_breaker": {
+                "active": self._circuit_breaker_active,
+                "reason": self._state.circuit_breaker_reason,
+            },
+            "daily": {
+                "pnl_pct": round(self._state.daily_pnl_pct * 100, 2),
+                "trades": self._state.trades_today,
+            },
+        }
+
+    def _get_throttle_reason(self) -> str:
+        """Get human-readable throttle reason."""
+        dd = self._state.current_drawdown_pct
+        throttle = self.get_throttle_factor()
+
+        if throttle == 1.0:
+            return "No throttling"
+        elif throttle == 0.0:
+            return f"Trading halted (drawdown {dd:.1%})"
+        else:
+            return f"Position size at {throttle:.0%} (drawdown {dd:.1%})"
+
+    async def record_trade(self, pnl: float = 0.0, current_capital: float = None):
         """
         Record that a trade was executed.
 
@@ -230,6 +425,11 @@ class RiskGuardian:
         - Last trade timestamp
         - Trades today count
         - Daily PnL if closing position
+        - Equity/drawdown tracking if capital provided
+
+        Args:
+            pnl: Realized PnL as percentage of capital (e.g., 0.01 = 1%)
+            current_capital: Current portfolio value (for drawdown tracking)
         """
         now = datetime.now(timezone.utc)
 
@@ -258,7 +458,11 @@ class RiskGuardian:
                 expire_seconds=86400,
             )
 
-        await self.save_state()
+        # Update equity curve and drawdown if capital provided
+        if current_capital is not None:
+            await self.update_equity(current_capital)
+        else:
+            await self.save_state()
 
     async def trigger_circuit_breaker(self, reason: str):
         """
@@ -288,11 +492,15 @@ class RiskGuardian:
             "max_total_exposure_pct": self.config.max_total_exposure_pct,
             "max_daily_loss_pct": self.config.max_daily_loss_pct,
             "max_drawdown_pct": self.config.max_drawdown_pct,
+            "circuit_breaker_drawdown_pct": self.config.circuit_breaker_drawdown_pct,
             "min_trade_interval_seconds": self.config.min_trade_interval_seconds,
             "max_trades_per_day": self.config.max_trades_per_day,
             "stop_loss_pct": self.config.stop_loss_pct,
             "take_profit_pct": self.config.take_profit_pct,
             "max_position_age_seconds": self.config.max_position_age_seconds,
+            "target_volatility": self.config.target_volatility,
+            "atr_stop_multiplier": self.config.atr_stop_multiplier,
+            "max_stop_loss_pct": self.config.max_stop_loss_pct,
         }
 
 

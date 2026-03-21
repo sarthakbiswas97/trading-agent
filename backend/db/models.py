@@ -140,6 +140,7 @@ class RiskSnapshot(Base):
     current_drawdown_pct = Column(Float, default=0.0)
     max_drawdown_pct = Column(Float, default=0.0)
     peak_capital = Column(Float)
+    current_capital = Column(Float)  # Added for capital tracking
 
     trades_today = Column(BigInteger, default=0)
     trading_enabled = Column(Boolean, default=True)
@@ -149,4 +150,27 @@ class RiskSnapshot(Base):
 
     __table_args__ = (
         Index("ix_risk_timestamp", "timestamp"),
+    )
+
+
+class CapitalSnapshot(Base):
+    """Capital state persistence for session recovery."""
+    __tablename__ = "capital_snapshots"
+
+    id = Column(String(36), primary_key=True)  # UUID or session ID
+    timestamp = Column(DateTime, nullable=False, default=func.now())
+
+    capital = Column(Float, nullable=False)
+    peak_capital = Column(Float, nullable=False)
+    current_drawdown_pct = Column(Float, default=0.0)
+    max_drawdown_pct = Column(Float, default=0.0)
+
+    session_id = Column(String(100))  # Optional session identifier
+    is_latest = Column(Boolean, default=True)  # Flag for easy lookup
+
+    created_at = Column(DateTime, default=func.now())
+
+    __table_args__ = (
+        Index("ix_capital_timestamp", "timestamp"),
+        Index("ix_capital_latest", "is_latest"),
     )

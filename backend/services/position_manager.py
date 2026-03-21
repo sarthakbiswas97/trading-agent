@@ -5,6 +5,7 @@ Manages:
 - Opening/closing positions
 - Tracking unrealized PnL
 - Position state persistence
+- Capital tracking and persistence
 """
 
 import json
@@ -13,7 +14,12 @@ from datetime import datetime, timezone
 from typing import Optional
 from dataclasses import dataclass, field, asdict
 
+from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert
+
 from events.publisher import event_publisher
+from db.database import get_session
+from db.models import CapitalSnapshot
 
 
 @dataclass
@@ -253,6 +259,128 @@ class PositionManager:
         entry = datetime.fromisoformat(self._position.entry_time.replace("Z", "+00:00"))
         now = datetime.now(timezone.utc)
         return (now - entry).total_seconds()
+
+    # ================================================================
+    # CAPITAL TRACKING & PERSISTENCE
+    # ================================================================
+
+    def get_current_capital(self) -> float:
+        """
+        Get current capital including unrealized PnL.
+
+        Returns:
+            Current portfolio value in USD
+        """
+        if self.has_position:
+            return self.capital + self._position.unrealized_pnl
+        return self.capital
+
+    def update_capital(self, realized_pnl: float):
+        """
+        Update capital after closing a position.
+
+        Args:
+            realized_pnl: Realized profit/loss in USD
+        """
+        self.capital += realized_pnl
+
+    async def save_capital_to_db(
+        self,
+        peak_capital: float,
+        current_drawdown_pct: float,
+        max_drawdown_pct: float,
+        session_id: str = None,
+    ):
+        """
+        Save capital state to PostgreSQL for persistence.
+
+        Called on graceful shutdown or periodically for recovery.
+
+        Args:
+            peak_capital: Peak capital (high water mark)
+            current_drawdown_pct: Current drawdown percentage
+            max_drawdown_pct: Maximum drawdown ever seen
+            session_id: Optional session identifier
+        """
+        try:
+            snapshot_id = str(uuid.uuid4())
+            now = datetime.utcnow()
+
+            async with get_session() as session:
+                # Mark all previous snapshots as not latest
+                await session.execute(
+                    update(CapitalSnapshot)
+                    .where(CapitalSnapshot.is_latest == True)
+                    .values(is_latest=False)
+                )
+
+                # Insert new snapshot as latest
+                snapshot = CapitalSnapshot(
+                    id=snapshot_id,
+                    timestamp=now,
+                    capital=self.capital,
+                    peak_capital=peak_capital,
+                    current_drawdown_pct=current_drawdown_pct,
+                    max_drawdown_pct=max_drawdown_pct,
+                    session_id=session_id,
+                    is_latest=True,
+                )
+                session.add(snapshot)
+
+            print(f"Capital snapshot saved: ${self.capital:.2f} (peak: ${peak_capital:.2f})")
+
+        except Exception as e:
+            print(f"Failed to save capital snapshot: {e}")
+
+    async def load_capital_from_db(self) -> Optional[dict]:
+        """
+        Load last known capital state from PostgreSQL.
+
+        Returns:
+            Dict with capital info or None if no snapshot exists
+        """
+        try:
+            async with get_session() as session:
+                result = await session.execute(
+                    select(CapitalSnapshot)
+                    .where(CapitalSnapshot.is_latest == True)
+                    .limit(1)
+                )
+                snapshot = result.scalar_one_or_none()
+
+                if snapshot:
+                    return {
+                        "capital": snapshot.capital,
+                        "peak_capital": snapshot.peak_capital,
+                        "current_drawdown_pct": snapshot.current_drawdown_pct,
+                        "max_drawdown_pct": snapshot.max_drawdown_pct,
+                        "timestamp": snapshot.timestamp.isoformat(),
+                    }
+
+        except Exception as e:
+            print(f"Failed to load capital snapshot: {e}")
+
+        return None
+
+    async def initialize_capital(self, default_capital: float = 10000.0):
+        """
+        Initialize capital on startup.
+
+        Loads from database if available, otherwise uses default.
+
+        Args:
+            default_capital: Default starting capital if no snapshot exists
+        """
+        saved = await self.load_capital_from_db()
+
+        if saved:
+            self.capital = saved["capital"]
+            print(f"Loaded capital from DB: ${self.capital:.2f}")
+            return saved
+        else:
+            self.capital = default_capital
+            print(f"Using default capital: ${self.capital:.2f}")
+            return None
 
 
 # Global singleton

@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from services.position_manager import PositionManager, PositionState
 from services.risk_guardian import RiskGuardian, RiskConfig
-from services.trade_executor import TradeExecutorService, ENTRY_CONFIDENCE_THRESHOLD, POSITION_SIZE_PCT
+from services.trade_executor import TradeExecutorService, ENTRY_CONFIDENCE_THRESHOLD, BASE_POSITION_SIZE_PCT
 from models.decision import TradeAction
 
 
@@ -72,16 +72,13 @@ class TestPositionManager:
     @pytest.mark.asyncio
     async def test_open_close_position(self):
         """Test opening and closing a position."""
-        import services.position_manager as pm_module
+        from unittest.mock import patch
 
-        # Mock the event_publisher
         mock_publisher = MockEventPublisher()
-        original_publisher = pm_module.event_publisher
-        pm_module.event_publisher = mock_publisher
 
-        try:
+        # Patch where it's used (services.position_manager.event_publisher)
+        with patch('services.position_manager.event_publisher', mock_publisher):
             pm = PositionManager(initial_capital=10000.0)
-            pm_module.event_publisher = mock_publisher
 
             # Open position
             pos = await pm.open_position(
@@ -111,9 +108,6 @@ class TestPositionManager:
 
             assert not pm.has_position
             assert realized_pnl == pytest.approx(15.0)
-
-        finally:
-            pm_module.event_publisher = original_publisher
 
 
 class TestRiskGuardian:
@@ -196,6 +190,75 @@ class TestRiskGuardian:
         assert rg.check_take_profit(0.04)      # +4% - triggered
         assert rg.check_take_profit(0.10)      # +10% - triggered
 
+    def test_throttle_factor_brackets(self):
+        """Test drawdown-based throttling brackets."""
+        rg = RiskGuardian()
+
+        # No drawdown = full size
+        rg._state.current_drawdown_pct = 0.0
+        assert rg.get_throttle_factor() == 1.0
+
+        # 1% drawdown = full size
+        rg._state.current_drawdown_pct = 0.01
+        assert rg.get_throttle_factor() == 1.0
+
+        # 3% drawdown = 75% size
+        rg._state.current_drawdown_pct = 0.03
+        assert rg.get_throttle_factor() == 0.75
+
+        # 5% drawdown = 50% size
+        rg._state.current_drawdown_pct = 0.05
+        assert rg.get_throttle_factor() == 0.50
+
+        # 7% drawdown = 25% size
+        rg._state.current_drawdown_pct = 0.07
+        assert rg.get_throttle_factor() == 0.25
+
+        # 8%+ drawdown = no trading
+        rg._state.current_drawdown_pct = 0.08
+        assert rg.get_throttle_factor() == 0.0
+
+    def test_volatility_scaled_position_size(self):
+        """Test volatility-based position sizing."""
+        rg = RiskGuardian(config=RiskConfig(
+            target_volatility=0.02,  # 2% target
+            max_position_size_pct=0.05,
+        ))
+        rg._state.current_drawdown_pct = 0.0  # No throttling
+
+        # Normal volatility = base size
+        size = rg.calculate_position_size(base_size_pct=0.03, current_volatility=0.02)
+        assert size == pytest.approx(0.03)
+
+        # High volatility (4%) = half size
+        size = rg.calculate_position_size(base_size_pct=0.03, current_volatility=0.04)
+        assert size == pytest.approx(0.015)
+
+        # Low volatility (1%) = double size (capped at max)
+        size = rg.calculate_position_size(base_size_pct=0.03, current_volatility=0.01)
+        assert size == pytest.approx(0.05)  # Capped at max 5%
+
+    def test_atr_based_stop_loss(self):
+        """Test ATR-based dynamic stop-loss calculation."""
+        rg = RiskGuardian(config=RiskConfig(
+            atr_stop_multiplier=2.0,
+            max_stop_loss_pct=0.03,
+        ))
+
+        # Entry at $2000, ATR = $20 → stop distance = $40 (2x ATR)
+        # 3% of $2000 = $60, so ATR stop ($40) is tighter → use ATR
+        stop = rg.calculate_stop_loss_price(entry_price=2000.0, atr=20.0)
+        assert stop == pytest.approx(1960.0)
+
+        # Entry at $2000, ATR = $40 → stop distance = $80 (2x ATR)
+        # 3% of $2000 = $60, so 3% cap ($60) is tighter → use cap
+        stop = rg.calculate_stop_loss_price(entry_price=2000.0, atr=40.0)
+        assert stop == pytest.approx(1940.0)
+
+        # Check trigger: ATR=20 → stop at $1960
+        assert rg.check_stop_loss_dynamic(entry_price=2000.0, current_price=1955.0, atr=20.0)  # Below stop
+        assert not rg.check_stop_loss_dynamic(entry_price=2000.0, current_price=1965.0, atr=20.0)  # Above stop
+
 
 class TestTradeDecisionLogic:
     """Tests for trade decision logic without full execution."""
@@ -205,28 +268,30 @@ class TestTradeDecisionLogic:
         """Test entry requires UP direction."""
         executor = TradeExecutorService()
 
-        # DOWN direction should not enter
-        action, reason = await executor._evaluate_entry(
+        # DOWN direction should not enter (now returns 3 values)
+        action, reason, position_size = await executor._evaluate_entry(
             direction="DOWN",
             confidence=0.70,
             price=2000.0,
         )
         assert action == TradeAction.HOLD
         assert "DOWN" in reason
+        assert position_size == 0.0
 
     @pytest.mark.asyncio
     async def test_entry_conditions_confidence(self):
         """Test entry requires sufficient confidence."""
         executor = TradeExecutorService()
 
-        # Low confidence should not enter
-        action, reason = await executor._evaluate_entry(
+        # Low confidence should not enter (now returns 3 values)
+        action, reason, position_size = await executor._evaluate_entry(
             direction="UP",
             confidence=0.50,  # Below 0.60 threshold
             price=2000.0,
         )
         assert action == TradeAction.HOLD
         assert "Confidence" in reason
+        assert position_size == 0.0
 
 
 class TestEndToEndFlow:
@@ -246,7 +311,8 @@ class TestEndToEndFlow:
             "shap_explanation": {},
         }
 
-        action, reason = await executor._evaluate_action(
+        # _evaluate_action now returns 3 values: (action, reason, position_size)
+        action, reason, position_size = await executor._evaluate_action(
             direction=prediction["direction"],
             confidence=prediction["confidence"],
             price=prediction["price"],
@@ -254,6 +320,7 @@ class TestEndToEndFlow:
 
         assert action == TradeAction.HOLD
         assert "DOWN" in reason
+        assert position_size == 0.0
 
 
 # Run with: pytest tests/test_trade_executor.py -v
