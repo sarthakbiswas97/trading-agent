@@ -17,7 +17,15 @@ from dataclasses import dataclass
 from eth_account import Account
 from eth_account.messages import encode_typed_data
 from web3 import Web3
-from web3.middleware import ExtraDataToPOAMiddleware
+
+# Handle different web3 versions for POA middleware
+try:
+    from web3.middleware import ExtraDataToPOAMiddleware
+except ImportError:
+    try:
+        from web3.middleware import geth_poa_middleware as ExtraDataToPOAMiddleware
+    except ImportError:
+        ExtraDataToPOAMiddleware = None
 
 from config import get_settings
 
@@ -101,8 +109,9 @@ class BlockchainClient:
             # Connect to RPC
             self._w3 = Web3(Web3.HTTPProvider(self.settings.rpc_url))
 
-            # Add PoA middleware for Base Sepolia
-            self._w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+            # Add PoA middleware for Base Sepolia (if available)
+            if ExtraDataToPOAMiddleware is not None:
+                self._w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 
             if not self._w3.is_connected():
                 print(f"[Blockchain] Failed to connect to {self.settings.rpc_url}")

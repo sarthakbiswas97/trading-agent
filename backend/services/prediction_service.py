@@ -103,7 +103,8 @@ class PredictionService:
             print("Model not loaded")
             return None
 
-        # Extract features in correct order (matching training)
+        # Extract all 14 features in correct order (matching training)
+        # Uses normalized values matching to_array_full() from FeatureVector
         feature_values = np.array([[
             features.rsi,
             features.macd,
@@ -114,6 +115,11 @@ class PredictionService:
             features.volume_spike,
             features.momentum,
             features.bollinger_position,
+            features.adx,
+            features.atr,
+            features.volatility_regime,
+            features.price_acceleration,
+            features.range_position,
         ]])
 
         # Get prediction and probability (no scaling needed for XGBoost)
