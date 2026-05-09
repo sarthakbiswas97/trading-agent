@@ -14,6 +14,7 @@ from services.position_manager import position_manager
 from services.risk_guardian import risk_guardian
 from services.blockchain_client import blockchain_client
 from services.dwallet_client import dwallet_client
+from services.encrypt_client import encrypt_client
 from events import event_publisher
 from sqlalchemy import select
 
@@ -61,6 +62,13 @@ async def lifespan(app: FastAPI):
     else:
         print("dWallet client disabled - operating without MPC custody")
 
+    # Initialize Encrypt client
+    print("Initializing Encrypt FHE client...")
+    if await encrypt_client.initialize():
+        print("Encrypt client ready - decision metadata will be encrypted")
+    else:
+        print("Encrypt client disabled - operating with plaintext metadata")
+
     print(f"{settings.agent_name} is ready!")
 
     yield
@@ -74,6 +82,7 @@ async def lifespan(app: FastAPI):
     await market_data_service.stop()
     await blockchain_client.close()
     await dwallet_client.close()
+    await encrypt_client.close()
     await close_db()
 
     print("Shutdown complete")
@@ -468,6 +477,15 @@ async def get_dwallet_status():
             "max_daily_loss_bps": int(settings.max_daily_loss * 10000),
             "max_drawdown_bps": int(settings.max_drawdown * 10000),
         },
+    }
+
+
+@app.get("/agent/encrypt")
+async def get_encrypt_status():
+    """Get Encrypt FHE privacy status."""
+    return {
+        "encrypt": encrypt_client.get_status(),
+        "encrypted_decisions": encrypt_client.get_encrypted_decisions_summary(),
     }
 
 

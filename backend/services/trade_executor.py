@@ -22,6 +22,7 @@ from events.publisher import event_publisher
 from services.position_manager import position_manager, PositionState
 from services.risk_guardian import risk_guardian
 from services.blockchain_client import blockchain_client
+from services.encrypt_client import encrypt_client
 from services.feature_engine import feature_engine
 from models.decision import TradeAction, DecisionRecord, MarketState, ModelOutput, StrategyDecision, RiskValidation
 from db.database import get_session
@@ -389,7 +390,29 @@ class TradeExecutorService:
                 print(f"  [Guardrail] Check error (proceeding): {e}")
 
         # ─────────────────────────────────────────────────────────────
-        # STEP 1: Log decision hash on-chain (before execution)
+        # STEP 1a: Encrypt sensitive decision metadata (FHE privacy)
+        # ─────────────────────────────────────────────────────────────
+        encrypted_confidence = None
+        encrypted_risk_score = None
+        if encrypt_client.is_enabled:
+            try:
+                encrypted_confidence, encrypted_risk_score = (
+                    await encrypt_client.encrypt_decision_metadata(
+                        confidence=decision.model_output.confidence,
+                        risk_score=decision.risk_validation.risk_score,
+                    )
+                )
+                print(
+                    f"  [Encrypt] Confidence -> {encrypted_confidence.ciphertext_account[:16]}..."
+                )
+                print(
+                    f"  [Encrypt] RiskScore  -> {encrypted_risk_score.ciphertext_account[:16]}..."
+                )
+            except Exception as e:
+                print(f"  [Encrypt] Encryption error (proceeding with plaintext): {e}")
+
+        # ─────────────────────────────────────────────────────────────
+        # STEP 1b: Log decision hash on-chain (before execution)
         # ─────────────────────────────────────────────────────────────
         validation_tx_hash = None
         if blockchain_client.is_enabled:
