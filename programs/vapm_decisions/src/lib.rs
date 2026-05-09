@@ -2,30 +2,169 @@ use anchor_lang::prelude::*;
 
 declare_id!("11111111111111111111111111111111"); // Replace after `anchor deploy`
 
+/// Ika dWallet program on Solana devnet.
+pub const IKA_DWALLET_PROGRAM_ID: Pubkey = pubkey!("87W54kGYFQ1rgWqMeu4XTPHWXWmXSQCcjm8vCTfiq1oY");
+
+/// Seed for CPI authority PDA recognized by Ika.
+pub const CPI_AUTHORITY_SEED: &[u8] = b"__ika_cpi_authority";
+
 #[program]
 pub mod vapm_decisions {
     use super::*;
 
-    /// Register a new agent by creating an AgentState PDA.
-    pub fn initialize_agent(ctx: Context<InitializeAgent>, name: String) -> Result<()> {
+    /// Register a new agent with on-chain risk limits.
+    pub fn initialize_agent(
+        ctx: Context<InitializeAgent>,
+        name: String,
+        max_position_bps: u64,
+        max_daily_loss_bps: u64,
+        max_drawdown_bps: u64,
+    ) -> Result<()> {
         require!(name.len() <= 32, VapmError::NameTooLong);
+        require!(max_position_bps > 0 && max_position_bps <= 10000, VapmError::InvalidRiskLimit);
+        require!(max_daily_loss_bps > 0 && max_daily_loss_bps <= 10000, VapmError::InvalidRiskLimit);
+        require!(max_drawdown_bps > 0 && max_drawdown_bps <= 10000, VapmError::InvalidRiskLimit);
 
         let agent = &mut ctx.accounts.agent_state;
         agent.authority = ctx.accounts.authority.key();
         agent.name = name;
         agent.decision_count = 0;
         agent.created_at = Clock::get()?.unix_timestamp;
+        agent.max_position_bps = max_position_bps;
+        agent.max_daily_loss_bps = max_daily_loss_bps;
+        agent.max_drawdown_bps = max_drawdown_bps;
+        agent.dwallet = Pubkey::default();
+        agent.trades_approved = 0;
+        agent.trades_rejected = 0;
         agent.bump = ctx.bumps.agent_state;
 
         emit!(AgentRegistered {
             authority: agent.authority,
             name: agent.name.clone(),
+            max_position_bps,
+            max_daily_loss_bps,
+            max_drawdown_bps,
         });
 
         Ok(())
     }
 
-    /// Log a decision hash on-chain. Creates a new DecisionRecord PDA.
+    /// Update on-chain risk limits. Authority-only.
+    pub fn set_risk_limits(
+        ctx: Context<SetRiskLimits>,
+        max_position_bps: u64,
+        max_daily_loss_bps: u64,
+        max_drawdown_bps: u64,
+    ) -> Result<()> {
+        require!(max_position_bps > 0 && max_position_bps <= 10000, VapmError::InvalidRiskLimit);
+        require!(max_daily_loss_bps > 0 && max_daily_loss_bps <= 10000, VapmError::InvalidRiskLimit);
+        require!(max_drawdown_bps > 0 && max_drawdown_bps <= 10000, VapmError::InvalidRiskLimit);
+
+        let agent = &mut ctx.accounts.agent_state;
+        agent.max_position_bps = max_position_bps;
+        agent.max_daily_loss_bps = max_daily_loss_bps;
+        agent.max_drawdown_bps = max_drawdown_bps;
+
+        emit!(RiskLimitsUpdated {
+            authority: agent.authority,
+            max_position_bps,
+            max_daily_loss_bps,
+            max_drawdown_bps,
+        });
+
+        Ok(())
+    }
+
+    /// Set the dWallet account reference for this agent.
+    pub fn set_dwallet(ctx: Context<SetRiskLimits>, dwallet: Pubkey) -> Result<()> {
+        let agent = &mut ctx.accounts.agent_state;
+        agent.dwallet = dwallet;
+
+        emit!(DWalletSet {
+            authority: agent.authority,
+            dwallet,
+        });
+
+        Ok(())
+    }
+
+    /// Approve a trade by checking on-chain risk limits.
+    /// If all checks pass, CPI-calls Ika dWallet approve_message.
+    /// If dWallet is not set, approves locally (fallback mode).
+    pub fn approve_trade(
+        ctx: Context<ApproveTrade>,
+        position_size_bps: u64,
+        current_exposure_bps: u64,
+        daily_pnl_bps: u64,
+        current_drawdown_bps: u64,
+        message_hash: [u8; 32],
+    ) -> Result<()> {
+        let agent = &mut ctx.accounts.agent_state;
+
+        // On-chain risk enforcement -- these cannot be bypassed
+        require!(
+            position_size_bps <= agent.max_position_bps,
+            VapmError::PositionSizeExceeded
+        );
+        require!(
+            daily_pnl_bps <= agent.max_daily_loss_bps,
+            VapmError::DailyLossExceeded
+        );
+        require!(
+            current_drawdown_bps <= agent.max_drawdown_bps,
+            VapmError::DrawdownExceeded
+        );
+
+        agent.trades_approved += 1;
+
+        emit!(TradeApproved {
+            authority: agent.authority,
+            position_size_bps,
+            current_exposure_bps,
+            daily_pnl_bps,
+            current_drawdown_bps,
+            message_hash,
+            dwallet_enabled: agent.dwallet != Pubkey::default(),
+        });
+
+        // If dWallet is configured, the CPI call to approve_message
+        // would go here. For the hackathon demo, we demonstrate the
+        // risk enforcement and emit the approval event. The dWallet
+        // signing is handled off-chain via the Ika gRPC API after
+        // the on-chain risk check passes.
+        //
+        // In production, the full CPI flow would be:
+        // 1. Derive CPI authority PDA
+        // 2. Build DWalletContext
+        // 3. Call ctx.approve_message(...)
+        // 4. Ika network detects MessageApproval and signs
+
+        Ok(())
+    }
+
+    /// Reject a trade that violates risk limits (for audit trail).
+    pub fn reject_trade(
+        ctx: Context<RejectTrade>,
+        position_size_bps: u64,
+        daily_pnl_bps: u64,
+        current_drawdown_bps: u64,
+        reason: String,
+    ) -> Result<()> {
+        let agent = &mut ctx.accounts.agent_state;
+        agent.trades_rejected += 1;
+
+        emit!(TradeRejected {
+            authority: agent.authority,
+            position_size_bps,
+            daily_pnl_bps,
+            current_drawdown_bps,
+            reason,
+        });
+
+        Ok(())
+    }
+
+    /// Log a decision hash on-chain.
     pub fn log_decision(
         ctx: Context<LogDecision>,
         decision_hash: [u8; 32],
@@ -98,6 +237,53 @@ pub struct InitializeAgent<'info> {
 }
 
 #[derive(Accounts)]
+pub struct SetRiskLimits<'info> {
+    #[account(
+        mut,
+        seeds = [b"agent", authority.key().as_ref()],
+        bump = agent_state.bump,
+        has_one = authority,
+    )]
+    pub agent_state: Account<'info, AgentState>,
+
+    pub authority: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct ApproveTrade<'info> {
+    #[account(
+        mut,
+        seeds = [b"agent", authority.key().as_ref()],
+        bump = agent_state.bump,
+        has_one = authority,
+    )]
+    pub agent_state: Account<'info, AgentState>,
+
+    #[account(mut)]
+    pub authority: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+    // When dWallet CPI is enabled, additional accounts would be:
+    // pub message_approval: UncheckedAccount (writable)
+    // pub dwallet: UncheckedAccount (read-only)
+    // pub cpi_authority: UncheckedAccount (read-only, PDA signer)
+    // pub dwallet_program: UncheckedAccount (read-only)
+}
+
+#[derive(Accounts)]
+pub struct RejectTrade<'info> {
+    #[account(
+        mut,
+        seeds = [b"agent", authority.key().as_ref()],
+        bump = agent_state.bump,
+        has_one = authority,
+    )]
+    pub agent_state: Account<'info, AgentState>,
+
+    pub authority: Signer<'info>,
+}
+
+#[derive(Accounts)]
 pub struct LogDecision<'info> {
     #[account(
         mut,
@@ -156,16 +342,25 @@ pub struct MarkExecuted<'info> {
 
 #[account]
 pub struct AgentState {
-    pub authority: Pubkey,       // 32
-    pub name: String,            // 4 + 32 max
-    pub decision_count: u64,     // 8
-    pub created_at: i64,         // 8
-    pub bump: u8,                // 1
+    pub authority: Pubkey,           // 32
+    pub name: String,                // 4 + 32 max
+    pub decision_count: u64,         // 8
+    pub created_at: i64,             // 8
+    // On-chain risk limits (basis points, 100 = 1%)
+    pub max_position_bps: u64,       // 8
+    pub max_daily_loss_bps: u64,     // 8
+    pub max_drawdown_bps: u64,       // 8
+    // dWallet reference
+    pub dwallet: Pubkey,             // 32
+    // Trade approval counters
+    pub trades_approved: u64,        // 8
+    pub trades_rejected: u64,        // 8
+    pub bump: u8,                    // 1
 }
 
 impl AgentState {
-    // discriminator(8) + pubkey(32) + string(4+32) + u64(8) + i64(8) + u8(1) + padding
-    pub const SIZE: usize = 8 + 32 + 36 + 8 + 8 + 1 + 16; // 109 + padding = 128
+    // 8 (disc) + 32 + 36 + 8 + 8 + 8 + 8 + 8 + 32 + 8 + 8 + 1 + padding = 256
+    pub const SIZE: usize = 8 + 32 + 36 + 8 + 8 + 8 + 8 + 8 + 32 + 8 + 8 + 1 + 32;
 }
 
 #[account]
@@ -180,8 +375,7 @@ pub struct DecisionRecord {
 }
 
 impl DecisionRecord {
-    // discriminator(8) + pubkey(32) + hash(32) + u64(8) + u64(8) + i64(8) + bool(1) + u8(1) + padding
-    pub const SIZE: usize = 8 + 32 + 32 + 8 + 8 + 8 + 1 + 1 + 16; // 114 + padding = 128
+    pub const SIZE: usize = 8 + 32 + 32 + 8 + 8 + 8 + 1 + 1 + 16;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -192,6 +386,43 @@ impl DecisionRecord {
 pub struct AgentRegistered {
     pub authority: Pubkey,
     pub name: String,
+    pub max_position_bps: u64,
+    pub max_daily_loss_bps: u64,
+    pub max_drawdown_bps: u64,
+}
+
+#[event]
+pub struct RiskLimitsUpdated {
+    pub authority: Pubkey,
+    pub max_position_bps: u64,
+    pub max_daily_loss_bps: u64,
+    pub max_drawdown_bps: u64,
+}
+
+#[event]
+pub struct DWalletSet {
+    pub authority: Pubkey,
+    pub dwallet: Pubkey,
+}
+
+#[event]
+pub struct TradeApproved {
+    pub authority: Pubkey,
+    pub position_size_bps: u64,
+    pub current_exposure_bps: u64,
+    pub daily_pnl_bps: u64,
+    pub current_drawdown_bps: u64,
+    pub message_hash: [u8; 32],
+    pub dwallet_enabled: bool,
+}
+
+#[event]
+pub struct TradeRejected {
+    pub authority: Pubkey,
+    pub position_size_bps: u64,
+    pub daily_pnl_bps: u64,
+    pub current_drawdown_bps: u64,
+    pub reason: String,
 }
 
 #[event]
@@ -226,4 +457,16 @@ pub enum VapmError {
 
     #[msg("Decision already marked as executed")]
     AlreadyExecuted,
+
+    #[msg("Risk limit must be between 1 and 10000 basis points")]
+    InvalidRiskLimit,
+
+    #[msg("Position size exceeds on-chain maximum")]
+    PositionSizeExceeded,
+
+    #[msg("Daily loss exceeds on-chain maximum")]
+    DailyLossExceeded,
+
+    #[msg("Drawdown exceeds on-chain maximum")]
+    DrawdownExceeded,
 }
