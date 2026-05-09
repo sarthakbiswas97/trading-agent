@@ -13,6 +13,7 @@ from services.trade_executor import trade_executor
 from services.position_manager import position_manager
 from services.risk_guardian import risk_guardian
 from services.blockchain_client import blockchain_client
+from services.dwallet_client import dwallet_client
 from events import event_publisher
 from sqlalchemy import select
 
@@ -53,6 +54,13 @@ async def lifespan(app: FastAPI):
     else:
         print("Blockchain client disabled or not configured")
 
+    # Initialize dWallet client
+    print("Initializing dWallet client...")
+    if await dwallet_client.initialize():
+        print("dWallet client ready")
+    else:
+        print("dWallet client disabled - operating without MPC custody")
+
     print(f"{settings.agent_name} is ready!")
 
     yield
@@ -65,6 +73,7 @@ async def lifespan(app: FastAPI):
     await trade_executor.stop()
     await market_data_service.stop()
     await blockchain_client.close()
+    await dwallet_client.close()
     await close_db()
 
     print("Shutdown complete")
@@ -442,6 +451,23 @@ async def get_onchain_decisions():
     return {
         "agent_address": blockchain_client.address,
         "decision_count": count,
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# DWALLET / CUSTODY ENDPOINTS
+# ─────────────────────────────────────────────────────────────
+
+@app.get("/agent/dwallet")
+async def get_dwallet_status():
+    """Get dWallet custody status and configuration."""
+    return {
+        "dwallet": dwallet_client.get_status(),
+        "risk_limits": {
+            "max_position_bps": int(settings.max_position_size * 10000),
+            "max_daily_loss_bps": int(settings.max_daily_loss * 10000),
+            "max_drawdown_bps": int(settings.max_drawdown * 10000),
+        },
     }
 
 
