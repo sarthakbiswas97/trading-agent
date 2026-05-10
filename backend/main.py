@@ -15,6 +15,7 @@ from services.risk_guardian import risk_guardian
 from services.blockchain_client import blockchain_client
 from services.dwallet_client import dwallet_client
 from services.encrypt_client import encrypt_client
+from services.onchain_reader import onchain_reader
 from events import event_publisher
 from sqlalchemy import select
 
@@ -487,6 +488,17 @@ async def get_encrypt_status():
         "encrypt": encrypt_client.get_status(),
         "encrypted_decisions": encrypt_client.get_encrypted_decisions_summary(),
     }
+
+
+@app.get("/agent/live")
+async def get_live_onchain_data():
+    """Get REAL on-chain data from Solana devnet.
+
+    Reads AgentState and TradeProposal PDAs directly from devnet RPC.
+    Returns parsed account data with Solana Explorer links.
+    """
+    authority = blockchain_client.address or ""
+    return await onchain_reader.get_live_data(authority)
 
 
 if __name__ == "__main__":
