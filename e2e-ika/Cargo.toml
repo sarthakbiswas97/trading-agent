@@ -1,0 +1,25 @@
+[package]
+name = "vapm-e2e-ika"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "vapm-e2e-ika"
+path = "src/main.rs"
+
+[dependencies]
+ika-grpc = { git = "https://github.com/dwallet-labs/ika-pre-alpha" }
+ika-dwallet-types = { git = "https://github.com/dwallet-labs/ika-pre-alpha" }
+solana-sdk = "2.2"
+solana-rpc-client = "2.2"
+tokio = { version = "1", features = ["full"] }
+tonic = { version = "0.14", features = ["tls-native-roots"] }
+prost = "0.14"
+bcs = "0.1"
+serde = { version = "1", features = ["derive"] }
+bs58 = "0.5"
+hex = "0.4"
+ed25519-dalek = "2"
