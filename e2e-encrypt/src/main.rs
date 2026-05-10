@@ -72,7 +72,7 @@ fn send_tx(c: &RpcClient, p: &Keypair, ixs: Vec<Instruction>, extra: &[&Keypair]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let encrypt_program = Pubkey::from_str("4ebfzWdKnrnGseuQpezXdG8yCdHqwQ1SSBHD3bWArND8")?;
     let vapm_program = Pubkey::from_str(
-        &env::args().nth(1).unwrap_or("DEAci1VN41bK8KmQJYYizWXAbudvre1Jhkp5QPLWVgmq".into())
+        &env::args().nth(1).unwrap_or("6xDo2r8Edvu1MHxwUtqmmzm3Auavf2fokbjGoJHxcMLx".into())
     )?;
 
     let rpc_url = env::var("RPC_URL").unwrap_or("https://api.devnet.solana.com".into());
