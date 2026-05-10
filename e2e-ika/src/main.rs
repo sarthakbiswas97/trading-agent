@@ -93,7 +93,7 @@ fn build_grpc_request(payer: &Keypair, data: SignedRequestData) -> UserSignedReq
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dwallet_program = Pubkey::from_str("87W54kGYFQ1rgWqMeu4XTPHWXWmXSQCcjm8vCTfiq1oY")?;
     let vapm_program = Pubkey::from_str(
-        &env::args().nth(1).unwrap_or("DEAci1VN41bK8KmQJYYizWXAbudvre1Jhkp5QPLWVgmq".into())
+        &env::args().nth(1).unwrap_or("6xDo2r8Edvu1MHxwUtqmmzm3Auavf2fokbjGoJHxcMLx".into())
     )?;
     let rpc_url = env::var("RPC_URL").unwrap_or("https://api.devnet.solana.com".into());
     let grpc_url = env::var("GRPC_URL").unwrap_or("https://pre-alpha-dev-1.ika.ika-network.net:443".into());
