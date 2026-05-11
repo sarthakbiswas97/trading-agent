@@ -263,6 +263,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     val("Message", String::from_utf8_lossy(trade_msg));
     val("Keccak256", hex::encode(message_hash));
 
+    // ═══ Step 5.5: Attempt FHE risk check (execute_risk_check) ═══
+    log("5.5/8", "Attempting FHE risk check via Encrypt CPI...");
+
+    // The execute_risk_check instruction does CPI to Encrypt's execute_graph.
+    // This requires real Encrypt ciphertext accounts created via Encrypt gRPC.
+    // In the pre-alpha, the encrypt-solana-client has a broken dependency
+    // (missing generated protobuf module), so we can't create real ciphertexts.
+    //
+    // The instruction IS wired in the program -- here's what it does:
+    //   1. Selects encrypted trade param (enc_position) and limit (enc_max_position)
+    //   2. Builds execute_graph CPI data with disc=4
+    //   3. invoke_signed with seed b"__encrypt_cpi_authority"
+    //   4. Encrypt program runs FHE: encrypted_a <= encrypted_b
+    //   5. Result stored as EBool ciphertext ref in TradeProposal
+    //
+    // We skip the CPI call here because the ciphertext accounts are placeholder
+    // Pubkeys (not real Encrypt program-owned accounts). The Encrypt program
+    // would reject them. This is documented as a pre-alpha limitation.
+
+    let (encrypt_cpi, encrypt_bump) = Pubkey::find_program_address(
+        &[b"__encrypt_cpi_authority"], &vapm_program,
+    );
+    val("Encrypt CPI authority", encrypt_cpi);
+    val("Encrypt CPI bump", encrypt_bump);
+    ok("execute_risk_check instruction ready (requires real Encrypt ciphertexts)");
+    ok("Skipping CPI: placeholder ciphertext accounts, not Encrypt-owned");
+    println!("  In production: Encrypt gRPC creates real ciphertexts -> CPI compares them");
+
     // ═══ Step 6: Finalize trade (approve via dWallet) ═══
     log("6/8", "Finalizing trade: risk check passed, requesting dWallet signature...");
 
