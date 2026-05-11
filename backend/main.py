@@ -341,6 +341,87 @@ async def reset_circuit_breaker():
     }
 
 
+@app.put("/risk/limits")
+async def update_risk_limits(
+    max_position_size: float = 0.05,
+    max_daily_loss: float = 0.03,
+    max_drawdown: float = 0.10,
+):
+    """Update risk limit configuration."""
+    settings.max_position_size = max_position_size
+    settings.max_daily_loss = max_daily_loss
+    settings.max_drawdown = max_drawdown
+    return {
+        "success": True,
+        "limits": {
+            "max_position_size": max_position_size,
+            "max_daily_loss": max_daily_loss,
+            "max_drawdown": max_drawdown,
+        },
+    }
+
+
+@app.get("/performance/metrics")
+async def get_performance_metrics():
+    """Get trading performance metrics from trade history."""
+    trades = trade_executor.trade_history
+    if not trades:
+        return {
+            "total_trades": 0,
+            "win_rate": 0.0,
+            "total_pnl": 0.0,
+            "avg_win": 0.0,
+            "avg_loss": 0.0,
+            "profit_factor": 0.0,
+            "max_drawdown_pct": risk_guardian.state.max_drawdown_pct,
+        }
+
+    wins = [t for t in trades if t.pnl and t.pnl > 0]
+    losses = [t for t in trades if t.pnl and t.pnl < 0]
+    total_pnl = sum(t.pnl for t in trades if t.pnl)
+    avg_win = sum(t.pnl for t in wins) / len(wins) if wins else 0.0
+    avg_loss = sum(t.pnl for t in losses) / len(losses) if losses else 0.0
+    gross_profit = sum(t.pnl for t in wins) if wins else 0.0
+    gross_loss = abs(sum(t.pnl for t in losses)) if losses else 0.0
+
+    return {
+        "total_trades": len(trades),
+        "winning_trades": len(wins),
+        "losing_trades": len(losses),
+        "win_rate": len(wins) / len(trades) if trades else 0.0,
+        "total_pnl": total_pnl,
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "profit_factor": gross_profit / gross_loss if gross_loss > 0 else 0.0,
+        "max_drawdown_pct": risk_guardian.state.max_drawdown_pct,
+        "capital": position_manager.capital,
+    }
+
+
+@app.get("/backtest/results")
+async def get_backtest_results():
+    """Serve pre-computed backtest results."""
+    import json
+    from pathlib import Path
+    results_path = Path(__file__).parent.parent / "ml" / "backtest_results.json"
+    if not results_path.exists():
+        return {"error": "Backtest not yet run. Execute: python ml/backtest.py"}
+    with open(results_path) as f:
+        return json.load(f)
+
+
+@app.get("/backtest/comparison")
+async def get_model_comparison():
+    """Serve model comparison results."""
+    import json
+    from pathlib import Path
+    comparison_path = Path(__file__).parent.parent / "ml" / "models" / "model_comparison.json"
+    if not comparison_path.exists():
+        return {"error": "Model comparison not yet run. Execute: python ml/train_model_comparison.py"}
+    with open(comparison_path) as f:
+        return json.load(f)
+
+
 # ─────────────────────────────────────────────────────────────
 # BLOCKCHAIN / VERIFICATION ENDPOINTS
 # ─────────────────────────────────────────────────────────────
@@ -589,6 +670,64 @@ async def get_live_onchain_data():
     """
     authority = blockchain_client.address or ""
     return await onchain_reader.get_live_data(authority)
+
+
+# -----------------------------------------------------------------
+# BACKTEST & PERFORMANCE ENDPOINTS
+# -----------------------------------------------------------------
+
+import json as _json
+from pathlib import Path as _Path
+
+_ML_DIR = _Path(__file__).resolve().parent.parent / "ml"
+_BACKTEST_RESULTS_PATH = _ML_DIR / "backtest_results.json"
+_MODEL_COMPARISON_PATH = _ML_DIR / "models" / "model_comparison.json"
+
+
+@app.get("/backtest/results")
+async def get_backtest_results():
+    """Serve pre-computed backtest results."""
+    if not _BACKTEST_RESULTS_PATH.exists():
+        return {"error": "Backtest results not found. Run ml/backtest.py first."}
+    with open(_BACKTEST_RESULTS_PATH) as f:
+        return _json.load(f)
+
+
+@app.get("/performance/metrics")
+async def get_performance_metrics():
+    """Compute summary performance metrics from backtest results."""
+    if not _BACKTEST_RESULTS_PATH.exists():
+        return {"error": "Backtest results not found. Run ml/backtest.py first."}
+
+    with open(_BACKTEST_RESULTS_PATH) as f:
+        data = _json.load(f)
+
+    metrics = {
+        "win_rate": data.get("win_rate", 0.0),
+        "sharpe_ratio": data.get("sharpe_ratio", 0.0),
+        "total_return_pct": data.get("total_return_pct", 0.0),
+        "max_drawdown_pct": data.get("max_drawdown_pct", 0.0),
+        "trade_count": data.get("total_trades", 0),
+        "profit_factor": data.get("profit_factor", 0.0),
+        "avg_win_pct": data.get("avg_win_pct", 0.0),
+        "avg_loss_pct": data.get("avg_loss_pct", 0.0),
+    }
+
+    # Include per-model summary if available
+    per_model = data.get("per_model")
+    if per_model:
+        metrics["per_model"] = {
+            name: {
+                "win_rate": r.get("win_rate", 0.0),
+                "sharpe_ratio": r.get("sharpe_ratio", 0.0),
+                "total_return_pct": r.get("total_return_pct", 0.0),
+                "max_drawdown_pct": r.get("max_drawdown_pct", 0.0),
+                "trade_count": r.get("total_trades", 0),
+            }
+            for name, r in per_model.items()
+        }
+
+    return metrics
 
 
 if __name__ == "__main__":
