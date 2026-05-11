@@ -3,6 +3,8 @@
 import { useState } from "react";
 import { useVAPMData } from "@/lib/api";
 import HeroBanner from "@/components/HeroBanner";
+import PriceChart from "@/components/PriceChart";
+import ShapChart from "@/components/ShapChart";
 import Pipeline from "@/components/Pipeline";
 import RejectionShowcase from "@/components/RejectionShowcase";
 import EncryptCard from "@/components/EncryptCard";
@@ -83,6 +85,8 @@ function TradeButton() {
 export default function Dashboard() {
   const data = useVAPMData();
 
+  const shap = data.prediction?.prediction?.shap_explanation;
+
   return (
     <main className="min-h-screen p-4 md:p-6 max-w-7xl mx-auto">
       {/* Zone 1: Hero */}
@@ -92,6 +96,27 @@ export default function Dashboard() {
         encrypt={data.encrypt}
         dwallet={data.dwallet}
       />
+
+      {/* Zone 1.5: Price Chart */}
+      <PriceChart />
+
+      {/* Zone 1.75: SHAP Summary (compact top 3 features) */}
+      {shap && Object.keys(shap).length > 0 && (
+        <div className="mb-6 p-5 bg-gray-900 rounded-2xl border border-gray-800">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
+              Top Prediction Drivers
+            </h2>
+            <a
+              href="/model"
+              className="text-[10px] text-amber-400 hover:text-amber-300 underline decoration-dotted"
+            >
+              View all features
+            </a>
+          </div>
+          <ShapChart shapExplanation={shap} maxFeatures={3} compact />
+        </div>
+      )}
 
       {/* Zone 2: Pipeline */}
       <Pipeline
