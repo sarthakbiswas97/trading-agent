@@ -1,0 +1,91 @@
+{
+  "timestamp": "2026-05-11T15:05:21.667846",
+  "dataset": "dataset/training_data_v2.csv",
+  "samples": 129486,
+  "train_samples": 103588,
+  "test_samples": 25898,
+  "features": [
+    "rsi",
+    "macd",
+    "macd_signal",
+    "macd_histogram",
+    "ema_ratio",
+    "volatility",
+    "volume_spike",
+    "momentum",
+    "bollinger_position"
+  ],
+  "models": [
+    {
+      "model_name": "XGBoost",
+      "model_path": "models/model_xgboost.joblib",
+      "needs_scaling": false,
+      "cv": {
+        "n_splits": 5,
+        "accuracy_mean": 0.5293674698795181,
+        "accuracy_std": 0.004376080851253557,
+        "f1_mean": 0.5536977761106149,
+        "f1_std": 0.010034031002052685,
+        "auc_mean": 0.5397508405430866,
+        "auc_std": 0.004007188135399786
+      },
+      "test": {
+        "accuracy": 0.5254845934048962,
+        "precision": 0.5241460541813898,
+        "recall": 0.5500193124758594,
+        "f1": 0.5367710807041352,
+        "auc": 0.5358440088698133,
+        "baseline": 0.5001544520812418,
+        "improvement_over_baseline": 0.02533014132365441
+      }
+    },
+    {
+      "model_name": "LightGBM",
+      "model_path": "models/model_lightgbm.joblib",
+      "needs_scaling": false,
+      "cv": {
+        "n_splits": 5,
+        "accuracy_mean": 0.5298424467099165,
+        "accuracy_std": 0.006783828247279096,
+        "f1_mean": 0.5543995689566306,
+        "f1_std": 0.009746126677712841,
+        "auc_mean": 0.538822430027564,
+        "auc_std": 0.004094354807719509
+      },
+      "test": {
+        "accuracy": 0.5258321105876902,
+        "precision": 0.5243500549249359,
+        "recall": 0.5531093086133643,
+        "f1": 0.5383458646616541,
+        "auc": 0.5360526247597421,
+        "baseline": 0.5001544520812418,
+        "improvement_over_baseline": 0.02567765850644843
+      }
+    },
+    {
+      "model_name": "LogisticRegression",
+      "model_path": "models/model_logisticregression.joblib",
+      "needs_scaling": true,
+      "cv": {
+        "n_splits": 5,
+        "accuracy_mean": 0.5311746987951808,
+        "accuracy_std": 0.010324352062278297,
+        "f1_mean": 0.5534889080628013,
+        "f1_std": 0.01929740918543658,
+        "auc_mean": 0.5428273240757215,
+        "auc_std": 0.011950020029223801
+      },
+      "test": {
+        "accuracy": 0.5220866476175766,
+        "precision": 0.5216298552932216,
+        "recall": 0.5290845886442642,
+        "f1": 0.5253307766059444,
+        "auc": 0.5296043511382343,
+        "baseline": 0.5001544520812418,
+        "improvement_over_baseline": 0.021932195536334853
+      }
+    }
+  ],
+  "best_by_f1": "LightGBM",
+  "best_by_auc": "LightGBM"
+}
