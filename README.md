@@ -4,13 +4,18 @@
 
 **Track:** Encrypt + Ika (Hybrid Solutions) | **Hackathon:** Frontier Hackathon (Superteam Earn)
 
-**Program ID:** `6xDo2r8Edvu1MHxwUtqmmzm3Auavf2fokbjGoJHxcMLx` (Solana Devnet)
+| | |
+|---|---|
+| **VAPM Program** | [`6xDo2r8Edvu1MHxwUtqmmzm3Auavf2fokbjGoJHxcMLx`](https://explorer.solana.com/address/6xDo2r8Edvu1MHxwUtqmmzm3Auavf2fokbjGoJHxcMLx?cluster=devnet) |
+| **Ika dWallet Program** | [`87W54kGYFQ1rgWqMeu4XTPHWXWmXSQCcjm8vCTfiq1oY`](https://explorer.solana.com/address/87W54kGYFQ1rgWqMeu4XTPHWXWmXSQCcjm8vCTfiq1oY?cluster=devnet) |
+| **Encrypt Program** | [`4ebfzWdKnrnGseuQpezXdG8yCdHqwQ1SSBHD3bWArND8`](https://explorer.solana.com/address/4ebfzWdKnrnGseuQpezXdG8yCdHqwQ1SSBHD3bWArND8?cluster=devnet) |
+| **Created dWallet** | [`7ruuv1nVgmTiNaPXvQtYRf5DQLjtPb8jH9ekcrmSM15o`](https://explorer.solana.com/address/7ruuv1nVgmTiNaPXvQtYRf5DQLjtPb8jH9ekcrmSM15o?cluster=devnet) |
 
 ---
 
 ## The Problem
 
-AI trading agents today suffer from two fundamental vulnerabilities:
+AI trading agents today suffer from three fundamental vulnerabilities:
 
 1. **Visible risk parameters.** Position limits, loss caps, and drawdown thresholds are stored as plaintext on-chain. Any observer can read the agent's risk profile and exploit its boundaries.
 
@@ -105,10 +110,6 @@ Ika provides dWallets -- distributed signing keys controlled by Solana programs 
 
 **What this prevents:** Unauthorized trading. No single party holds the private key. The key cannot sign without on-chain program approval, and the program will not approve without passing encrypted risk checks.
 
-**Deployed dWallet program:** `87W54kGYFQ1rgWqMeu4XTPHWXWmXSQCcjm8vCTfiq1oY`
-
-**Deployed Encrypt program:** `4ebfzWdKnrnGseuQpezXdG8yCdHqwQ1SSBHD3bWArND8`
-
 ---
 
 ## Program Instructions
@@ -163,8 +164,8 @@ Ika provides dWallets -- distributed signing keys controlled by Solana programs 
 
 ```bash
 # 1. Clone and configure
-git clone https://github.com/yourusername/vapm.git
-cd vapm
+git clone https://github.com/sarthaksbiswas97/vapm-agent.git
+cd vapm-agent
 cp .env.example .env
 
 # 2. Start infrastructure
@@ -178,12 +179,11 @@ solana-keygen new -o ~/.config/solana/id.json
 solana config set --url devnet
 solana airdrop 2
 
-# 5. Build and deploy program
-anchor build
+# 5. Build and deploy program (already deployed at 6xDo2r...cMLx)
+anchor build --no-idl
 solana program deploy target/deploy/vapm_decisions.so
-# Copy the program ID to .env as DECISION_PROGRAM_ID
 
-# 6. Create dWallet via Ika (runs full DKG lifecycle)
+# 6. Create dWallet via Ika (runs full DKG lifecycle on devnet)
 cd e2e-ika && cargo run
 
 # 7. Start backend
@@ -193,7 +193,12 @@ cd backend && uvicorn main:app --port 8001
 cd frontend && bun run dev
 ```
 
-The frontend dashboard is available at **http://localhost:3000**.
+The frontend dashboard at **http://localhost:3000** shows:
+- Live SOL/USDC price chart
+- ML predictions with SHAP explainability
+- Real on-chain agent state from devnet (PDAs, trade verdicts, encrypted refs)
+- Clickable Solana Explorer links for all on-chain accounts
+- End-to-end pipeline visualization (Market Data -> AI -> Encrypt FHE -> Risk Check -> dWallet)
 
 ### E2E Integration Binaries
 
@@ -213,12 +218,20 @@ cd e2e-encrypt && cargo run
 GET  /health                  System health check
 GET  /agent/status            Agent state and PnL
 GET  /agent/onchain           Solana identity and on-chain decisions
+GET  /agent/live              Live on-chain data from devnet RPC (PDAs, verdicts, explorer links)
 GET  /agent/dwallet           dWallet custody status and risk limits
 GET  /agent/encrypt           Encrypt FHE status and encrypted decisions
 GET  /market/price            Current SOL/USDC price
+GET  /market/candles          Historical OHLCV candles
 GET  /predict                 ML prediction with SHAP explanations
+GET  /predict/model           Model metadata and performance metrics
 GET  /trades/position         Current position state
+GET  /trades/status           Trade executor status and recent trades
+POST /trade/submit-demo       Submit a demo trade through full pipeline
 GET  /risk/state              Risk metrics
+GET  /risk/limits             Configured risk limits (bps)
+GET  /backtest/results        Historical backtest performance
+GET  /performance/metrics     Model accuracy, Sharpe ratio, win rate
 POST /agent/register          Register agent on-chain
 GET  /verify/{decision_id}    Verify decision hash against on-chain record
 ```
@@ -228,24 +241,29 @@ GET  /verify/{decision_id}    Verify decision hash against on-chain record
 ## Project Structure
 
 ```
-vapm/
-|-- programs/vapm_decisions/     Anchor program (Rust)
-|   |-- src/lib.rs               Risk checks, approve_trade, Ika + Encrypt CPI
-|-- e2e-ika/                     Ika dWallet lifecycle binary
-|-- e2e-encrypt/                 Encrypt FHE integration binary
+vapm-agent/
+|-- programs/vapm_decisions/      Anchor program (Rust)
+|   |-- src/lib.rs                CPI to Encrypt + Ika, risk checks, trade approval
+|   |-- src/encrypt_fns.rs        Encrypt FHE helper functions
+|-- e2e-ika/                      Ika dWallet E2E binary (DKG, authority transfer, signing)
+|-- e2e-encrypt/                  Encrypt FHE E2E binary
 |-- backend/
+|   |-- main.py                   FastAPI (30+ endpoints)
 |   |-- services/
-|   |   |-- trade_executor.py    Trading orchestrator
-|   |   |-- blockchain_client.py Solana + Jupiter integration
-|   |   |-- dwallet_client.py    Ika dWallet management
-|   |   |-- encrypt_client.py    Encrypt FHE privacy
-|   |   |-- risk_guardian.py     Risk management engine
+|   |   |-- onchain_reader.py     Live devnet RPC reader (parses PDAs, verdicts)
+|   |   |-- blockchain_client.py  Solana + Jupiter integration
+|   |   |-- dwallet_client.py     Ika dWallet management
+|   |   |-- encrypt_client.py     Encrypt FHE privacy
+|   |   |-- trade_executor.py     Trading orchestrator
+|   |   |-- risk_guardian.py      Risk management engine
 |   |   |-- prediction_service.py XGBoost + SHAP inference
-|   |-- models/                  Pydantic data models
-|   |-- core/                    Technical indicators
-|-- ml/                          ML training pipeline
-|-- frontend/                    Next.js dashboard
-|-- scripts/                     Setup and utility scripts
+|   |-- models/                   Pydantic data models
+|   |-- core/                     Technical indicators (20+)
+|-- ml/                           ML training, backtesting, model comparison
+|-- frontend/                     Next.js dashboard (3 pages, live on-chain data)
+|   |-- src/app/                  Dashboard, analytics, model pages
+|   |-- src/components/           Pipeline, DWalletCard, EncryptCard, charts
+|   |-- src/lib/                  API client, types
 ```
 
 ---
